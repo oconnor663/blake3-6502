@@ -23,7 +23,7 @@ void onClock() {
 
   unsigned int address = 0;
   for (int n = 0; n < 16; n++) {
-    int bit = digitalRead(ADDR[n] ? 1 : 0);
+    int bit = digitalRead(ADDR[n]) ? 1 : 0;
     Serial.print(bit);
     address = (address << 1) + bit;
   }
@@ -32,14 +32,17 @@ void onClock() {
 
   unsigned int data = 0;
   for (int n = 0; n < 8; n++) {
-    int bit = digitalRead(DATA[n] ? 1 : 0);
+    int bit = digitalRead(DATA[n]) ? 1 : 0;
     Serial.print(bit);
     data = (data << 1) + bit;
   }
 
-  sprintf(output, "   %04x  %c %02x", address, digitalRead(READ_WRITE) ? 'r' : 'w', data);
+  sprintf(
+    output, "   %04x  %c %02x",
+    address,
+    digitalRead(READ_WRITE) ? 'r' : 'W',
+    data);
   Serial.println(output);
 }
 
-void loop() {
-}
+void loop() { }
