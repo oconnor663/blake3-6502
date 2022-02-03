@@ -19,9 +19,6 @@ reset:
   lda #%11100000  ; top 3 pins of port A to output
   sta DDRA
 
-  lda #%00000001  ; clear the display
-  jsr lcd_instruction
-
   lda #%00111000  ; set 8-bit mode, 2-line display, 5x8 font
   jsr lcd_instruction
 
@@ -29,6 +26,9 @@ reset:
   jsr lcd_instruction
 
   lda #%00000110  ; increment cursor, do not shift display
+  jsr lcd_instruction
+
+  lda #%00000001  ; clear the display
   jsr lcd_instruction
 
   lda #"H"
@@ -73,7 +73,28 @@ reset:
 loop:
   jmp loop
 
+lcd_wait:
+  pha
+  lda #%00000000  ; all pins port B to input
+  sta DDRB
+lcdbusy:
+  lda #RW
+  sta PORTA
+  lda #(RW | E)
+  sta PORTA
+  lda PORTB
+  and #%10000000
+  bne lcdbusy
+
+  lda #RW
+  sta PORTA
+  lda #%11111111  ; all pins port B to output
+  sta DDRB
+  pla
+  rts
+
 lcd_instruction:
+  jsr lcd_wait
   sta PORTB
   lda #0          ; clear RS/RW/E
   sta PORTA
@@ -84,6 +105,7 @@ lcd_instruction:
   rts
 
 print_char:
+  jsr lcd_wait
   sta PORTB
   lda #RS         ; set RS, clear RW/E
   sta PORTA
