@@ -39,33 +39,122 @@ clear_loop:
   inx
   bne clear_loop
 
-  lda #$01
-  sta 42
-  lda #$02
-  sta 43
-  lda #$03
-  sta 44
-  lda #$04
+  ; put 0xaabbccdd at address 42
+  lda #$aa
   sta 45
-
-  lda #$50
-  sta 52
-  lda #$60
-  sta 53
-  lda #$70
-  sta 54
-  lda #$80
-  sta 55
+  lda #$bb
+  sta 44
+  lda #$cc
+  sta 43
+  lda #$dd
+  sta 42
 
   ldx #42
-  ldy #52
-  jsr xor_u32
+  jsr ror16_u32
+  jsr print_hex_u32
+
+  jsr lcd_line_two
+
+  ldx #42
+  jsr ror12_u32
   jsr print_hex_u32
 
 end_loop:
   jmp end_loop
 
-; *X += *Y, preserves registers
+; *X >>>= 16, preserves X
+ror16_u32:
+  ; swap *(X + 0) and *(X + 2)
+  lda $00, x
+  tay
+  lda $02, x
+  sta $00, x
+  tya
+  sta $02, x
+  ; swap *(X + 1) and *(X + 3)
+  lda $01, x
+  tay
+  lda $03, x
+  sta $01, x
+  tya
+  sta $03, x
+  rts
+
+; *X >>>= 12, preserves registers, bytes $00..02 are scratch
+ror12_u32:
+  ; copy byte0 and byte1
+  lda $00, x
+  sta $00
+  lda $01, x
+  sta $01
+
+  ; write byte0 lower nibble
+  lda $01, x
+  lsr
+  lsr
+  lsr
+  lsr
+  sta $00, x
+  ; write byte0 upper nibble
+  lda $02, x
+  asl
+  asl
+  asl
+  asl
+  ora $00, x
+  sta $00, x
+
+  ; write byte1 lower nibble
+  lda $02, x
+  lsr
+  lsr
+  lsr
+  lsr
+  sta $01, x
+  ; write byte1 upper nibble
+  lda $03, x
+  asl
+  asl
+  asl
+  asl
+  ora $01, x
+  sta $01, x
+
+  ; write byte2 lower nibble
+  lda $03, x
+  lsr
+  lsr
+  lsr
+  lsr
+  sta $02, x
+  ; write byte2 upper nibble, using scratch
+  lda $00
+  asl
+  asl
+  asl
+  asl
+  ora $02, x
+  sta $02, x
+
+  ; write byte2 lower nibble, using scratch
+  lda $00
+  lsr
+  lsr
+  lsr
+  lsr
+  sta $03, x
+  ; write byte2 upper nibble, using scratch
+  lda $01
+  asl
+  asl
+  asl
+  asl
+  ora $03, x
+  sta $03, x
+
+  rts
+
+; *X += *Y, preserves X and Y
 add_u32:
   clc
   lda $00, x
@@ -82,7 +171,7 @@ add_u32:
   sta $03, x
   rts
 
-; *X ^= *Y, preserves registers
+; *X ^= *Y, preserves X and Y
 xor_u32:
   lda $00, x
   eor $00, y
