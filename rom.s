@@ -30,49 +30,25 @@ main:
 
   jsr lcd_clear
 
-  lda #$00
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda #$01
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda #$02
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda #$10
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda #$20
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
+  ; initialize the zero page with incrementing bytes
+  lda $00
+  ldx $00
+clear_loop:
+  txa
+  sta $00, x
+  inx
+  bne clear_loop
 
-  jsr lcd_line_two
-
-  lda #$0a
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda #$0b
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda #$a0
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda #$b0
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda #$ff
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
+  lda #$aa
+  sta 42
+  lda #$bb
+  sta 43
+  lda #$cc
+  sta 44
+  lda #$dd
+  sta 45
+  ldx #42
+  jsr print_hex_u32
 
 end_loop:
   jmp end_loop
@@ -120,18 +96,6 @@ lcd_line_two:
   jsr lcd_instruction
   rts
 
-; str pointer at #0
-print_str:
-  ldy #0
-print_str_loop:
-  lda ($0), y
-  beq print_str_end
-  jsr print_char
-  iny
-  jmp print_str_loop
-print_str_end:
-  rts
-
 ; reads A
 print_char:
   jsr lcd_wait
@@ -144,17 +108,16 @@ print_char:
   sta PORTA
   rts
 
-; reads A
-print_hex_byte:
-  tax
-  lsr
-  lsr
-  lsr
-  lsr
-  jsr print_hex_nibble
-  txa
-  and #%00001111
-  jsr print_hex_nibble
+; str pointer at $00
+print_str:
+  ldy #0
+print_str_loop:
+  lda ($0), y
+  beq print_str_end
+  jsr print_char
+  iny
+  jmp print_str_loop
+print_str_end:
   rts
 
 ; reads A
@@ -172,6 +135,34 @@ print_hex_nibble_0_10:
 print_hex_nibble_end:
   jsr print_char
   rts
+
+; reads A
+print_hex_byte:
+  pha
+  lsr
+  lsr
+  lsr
+  lsr
+  jsr print_hex_nibble
+  pla
+  and #%00001111
+  jsr print_hex_nibble
+  rts
+
+; prints u32 at zp address X
+print_hex_u32:
+  lda #"0"
+  jsr print_char
+  lda #"x"
+  jsr print_char
+  lda $03, x
+  jsr print_hex_byte
+  lda $02, x
+  jsr print_hex_byte
+  lda $01, x
+  jsr print_hex_byte
+  lda $00, x
+  jsr print_hex_byte
 
 ; saves registers
 pause:
