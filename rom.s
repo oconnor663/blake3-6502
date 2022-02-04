@@ -39,21 +39,50 @@ clear_loop:
   inx
   bne clear_loop
 
-  lda #$aa
+  lda #$00
   sta 42
-  lda #$bb
+  lda #$22
   sta 43
-  lda #$cc
+  lda #$44
   sta 44
-  lda #$dd
+  lda #$66
   sta 45
+
+  lda #$11
+  sta 52
+  lda #$22
+  sta 53
+  lda #$33
+  sta 54
+  lda #$44
+  sta 55
+
   ldx #42
+  ldy #52
+  jsr add_u32
   jsr print_hex_u32
 
 end_loop:
   jmp end_loop
 
-; saves registers
+; *X += *Y, preserves registers
+add_u32:
+  clc
+  lda $00, x
+  adc $00, y
+  sta $00, x
+  lda $01, x
+  adc $01, y
+  sta $01, x
+  lda $02, x
+  adc $02, y
+  sta $02, x
+  lda $03, x
+  adc $03, y
+  sta $03, x
+  rts
+
+; preserves registers
 lcd_wait:
   pha
   lda #%00000000  ; all pins port B to input
@@ -149,7 +178,7 @@ print_hex_byte:
   jsr print_hex_nibble
   rts
 
-; prints u32 at zp address X
+; prints *X
 print_hex_u32:
   lda #"0"
   jsr print_char
@@ -163,8 +192,9 @@ print_hex_u32:
   jsr print_hex_byte
   lda $00, x
   jsr print_hex_byte
+  rts
 
-; saves registers
+; preserves registers
 pause:
   pha
   txa
