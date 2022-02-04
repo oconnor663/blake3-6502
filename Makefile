@@ -1,5 +1,5 @@
 vasm:
-	vasm6502_oldstyle -Fbin -dotdir rom.s && \
+	vasm6502_oldstyle -Fbin -dotdir -esc rom.s && \
 		hexdump -C a.out && \
 		minipro --device AT28C256 --write a.out
 

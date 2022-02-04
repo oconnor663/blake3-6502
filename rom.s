@@ -9,6 +9,9 @@ RS = %00100000
 
   .org $8000
 
+message1: .asciiz "I love you,"
+message2: .asciiz "Boyang!\xb1\xc5\xc0\xb6\xde\xbd\xb7\xc0\xde"
+
 main:
   ldx #$ff        ; initialize the stack pointer
   txs
@@ -22,26 +25,32 @@ main:
   lda #%00111000  ; set 8-bit mode, 2-line display, 5x8 font
   jsr lcd_instruction
 
-  lda #%00001110  ; display on, cursor on, blink off
+  lda #%00001100  ; display on, cursor off, blink off
   jsr lcd_instruction
 
   lda #%00000110  ; increment cursor, do not shift display
   jsr lcd_instruction
 
-  lda #%00000001  ; clear the display
-  jsr lcd_instruction
+  jsr lcd_clear
 
   ; write the string pointer to $0..2 and print it
-  lda #<message  ; lsb
+  lda #<message1  ; lsb
   sta $0
-  lda #>message  ; msb
+  lda #>message1  ; msb
+  sta $1
+  jsr print_str
+
+  jsr lcd_line_two
+
+  ; write the string pointer to $0..2 and print it
+  lda #<message2  ; lsb
+  sta $0
+  lda #>message2  ; msb
   sta $1
   jsr print_str
 
 end_loop:
   jmp end_loop
-
-message: .asciiz "I love you                             |Boyang!!!"
 
 lcd_wait:
   lda #%00000000  ; all pins port B to input
@@ -75,13 +84,23 @@ lcd_instruction:
   sta PORTA
   rts
 
+lcd_clear:
+  lda #%00000001  ; clear the display
+  jsr lcd_instruction
+  rts
+
+lcd_line_two:
+  lda #%10101000  ; DDRAM address to byte 40
+  jsr lcd_instruction
+  rts
+
 ; str pointer at #0
 print_str:
   ldy #0
 print_str_loop:
   lda ($0), y
   beq print_str_end
-  jsr pause
+  ; jsr pause
   jsr print_char
   iny
   jmp print_str_loop
