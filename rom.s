@@ -40,23 +40,23 @@ clear_loop:
   bne clear_loop
 
   ; put 0xaabbccdd at address 42
-  lda #$aa
+  lda #$04
   sta 45
-  lda #$bb
+  lda #$02
   sta 44
-  lda #$cc
+  lda #$01
   sta 43
-  lda #$dd
+  lda #$08
   sta 42
 
   ldx #42
-  jsr ror16_u32
+  jsr ror8_u32
   jsr print_hex_u32
 
   jsr lcd_line_two
 
   ldx #42
-  jsr ror12_u32
+  jsr ror7_u32
   jsr print_hex_u32
 
 end_loop:
@@ -151,6 +151,70 @@ ror12_u32:
   asl
   ora $03, x
   sta $03, x
+
+  rts
+
+; *X >>>= 8, preserves X
+ror8_u32:
+  ; stash byte0 in Y
+  lda $00, x
+  tay
+
+  ; move the top three bytes down
+  lda $01, x
+  sta $00, x
+  lda $02, x
+  sta $01, x
+  lda $03, x
+  sta $02, x
+
+  ; retrieve byte 0 from Y and write it
+  tya
+  sta $03, x
+
+  rts
+
+; *X >>>= 7, preserves X and Y, byte $00 is scratch
+ror7_u32:
+  ; save byte0 to $00
+  lda $00, x
+  sta $00
+
+  ; load byte1 and distribute its bits
+  lda $01, x
+  asl         ; the high bit is now in C
+  sta $00, x
+  lda #0
+  adc #0      ; retrieve the high bit from C
+  sta $01, x
+
+  ; load byte2 and distribute its bits
+  lda $02, x
+  asl         ; the high bit is now in C
+  ora $01, x
+  sta $01, x
+  lda #0
+  adc #0      ; retrieve the high bit
+  sta $02, x
+
+  ; load byte3 and distribute its bits
+  lda $03, x
+  asl         ; the high bit is now in C
+  ora $02, x
+  sta $02, x
+  lda #0
+  adc #0      ; retrieve the high bit
+  sta $03, x
+
+  ; load byte0 from scratch and distribute its bits
+  lda $00
+  asl         ; the high bit is now in C
+  ora $03, x
+  sta $03, x
+  lda #0
+  adc #0      ; retrieve the high bit
+  ora $00, x
+  sta $00, x
 
   rts
 
