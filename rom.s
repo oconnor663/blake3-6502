@@ -39,27 +39,27 @@ clear_loop:
   inx
   bne clear_loop
 
-  lda #$00
+  lda #$01
   sta 42
-  lda #$22
+  lda #$02
   sta 43
-  lda #$44
+  lda #$03
   sta 44
-  lda #$66
+  lda #$04
   sta 45
 
-  lda #$11
+  lda #$50
   sta 52
-  lda #$22
+  lda #$60
   sta 53
-  lda #$33
+  lda #$70
   sta 54
-  lda #$44
+  lda #$80
   sta 55
 
   ldx #42
   ldy #52
-  jsr add_u32
+  jsr xor_u32
   jsr print_hex_u32
 
 end_loop:
@@ -79,6 +79,22 @@ add_u32:
   sta $02, x
   lda $03, x
   adc $03, y
+  sta $03, x
+  rts
+
+; *X ^= *Y, preserves registers
+xor_u32:
+  lda $00, x
+  eor $00, y
+  sta $00, x
+  lda $01, x
+  eor $01, y
+  sta $01, x
+  lda $02, x
+  eor $02, y
+  sta $02, x
+  lda $03, x
+  eor $03, y
   sta $03, x
   rts
 
