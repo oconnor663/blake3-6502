@@ -9,9 +9,6 @@ RS = %00100000
 
   .org $8000
 
-message1: .asciiz "I love you,"
-message2: .asciiz "Boyang!\xb1\xc5\xc0\xb6\xde\xbd\xb7\xc0\xde"
-
 main:
   ldx #$ff        ; initialize the stack pointer
   txs
@@ -33,26 +30,56 @@ main:
 
   jsr lcd_clear
 
-  ; write the string pointer to $0..2 and print it
-  lda #<message1  ; lsb
-  sta $0
-  lda #>message1  ; msb
-  sta $1
-  jsr print_str
+  lda #$00
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda #$01
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda #$02
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda #$10
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda #$20
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
 
   jsr lcd_line_two
 
-  ; write the string pointer to $0..2 and print it
-  lda #<message2  ; lsb
-  sta $0
-  lda #>message2  ; msb
-  sta $1
-  jsr print_str
+  lda #$0a
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda #$0b
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda #$a0
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda #$b0
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda #$ff
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
 
 end_loop:
   jmp end_loop
 
+; saves registers
 lcd_wait:
+  pha
   lda #%00000000  ; all pins port B to input
   sta DDRB
 lcdbusy:
@@ -68,13 +95,12 @@ lcdbusy:
   sta PORTA
   lda #%11111111  ; all pins port B to output
   sta DDRB
+  pla
   rts
 
 ; reads A
 lcd_instruction:
-  pha
   jsr lcd_wait
-  pla
   sta PORTB
   lda #0          ; clear RS/RW/E
   sta PORTA
@@ -100,7 +126,6 @@ print_str:
 print_str_loop:
   lda ($0), y
   beq print_str_end
-  ; jsr pause
   jsr print_char
   iny
   jmp print_str_loop
@@ -109,9 +134,7 @@ print_str_end:
 
 ; reads A
 print_char:
-  pha
   jsr lcd_wait
-  pla
   sta PORTB
   lda #RS         ; set RS, clear RW/E
   sta PORTA
@@ -121,7 +144,36 @@ print_char:
   sta PORTA
   rts
 
-; saves A, X, and Y
+; reads A
+print_hex_byte:
+  tax
+  lsr
+  lsr
+  lsr
+  lsr
+  jsr print_hex_nibble
+  txa
+  and #%00001111
+  jsr print_hex_nibble
+  rts
+
+; reads A
+print_hex_nibble:
+  cmp #10
+  bmi print_hex_nibble_0_10
+  sec
+  sbc #10
+  clc
+  adc #"a"
+  jmp print_hex_nibble_end
+print_hex_nibble_0_10:
+  clc
+  adc #"0"
+print_hex_nibble_end:
+  jsr print_char
+  rts
+
+; saves registers
 pause:
   pha
   txa
