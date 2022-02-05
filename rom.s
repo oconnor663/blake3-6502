@@ -7,7 +7,16 @@ E  = %10000000
 RW = %01000000
 RS = %00100000
 
+; compression function constants
+; The whole second half of the zero page is reserved for the
+; compression function state and message block.
+; $80..c0 (64 bytes) is the internal state.
+H = $80
+; $c0..100 (64 bytes) is the message block.
+MSG = $c0
+
 ; G function constants
+; These are scratch space slots for zp pointers.
 A  = $02
 B  = $03
 C  = $04
@@ -47,37 +56,152 @@ init_zp_loop:
   inx
   bne init_zp_loop
 
-  ; use the 24 bytes starting at address 100 for a, b, c, d, mx, my
-  ; these have incrementing values starting at 100
-  ; store their addresses in $02..08
-  lda #100
-  sta A
-  lda #104
-  sta B
-  lda #108
-  sta C
-  lda #112
-  sta D
-  lda #116
-  sta MX
-  lda #120
-  sta MY
+  ; compress the state and message block we just initialized
+  jsr round
 
-  ; mix these 6 ints with g()
-  jsr g
-
-  ; print a and b
-  ldx A
+  ; print the first and second state words after compression
+  ldx #H
   jsr print_hex_u32
   jsr lcd_line_two
-  ldx B
+  ldx #(H + 4)
   jsr print_hex_u32
 
 end_loop:
   jmp end_loop
 
+; The top 128 bytes of the zero page are reserved for the
+; compression function state and message block. We don't
+; need any other arguments.
+round:
+  ; Mix the columns.
+
+  ; g(state, 0, 4, 8, 12, m[0], m[1]);
+  lda #(H + 4 * 0)
+  sta A
+  lda #(H + 4 * 4)
+  sta B
+  lda #(H + 4 * 8)
+  sta C
+  lda #(H + 4 * 12)
+  sta D
+  lda #(MSG + 4 * 0)
+  sta MX
+  lda #(MSG + 4 * 1)
+  sta MY
+  jsr g
+
+  ; g(state, 1, 5, 9, 13, m[2], m[3]);
+  lda #(H + 4 * 1)
+  sta A
+  lda #(H + 4 * 5)
+  sta B
+  lda #(H + 4 * 9)
+  sta C
+  lda #(H + 4 * 13)
+  sta D
+  lda #(MSG + 4 * 2)
+  sta MX
+  lda #(MSG + 4 * 3)
+  sta MY
+  jsr g
+
+  ; g(state, 2, 6, 10, 14, m[4], m[5]);
+  lda #(H + 4 * 2)
+  sta A
+  lda #(H + 4 * 6)
+  sta B
+  lda #(H + 4 * 10)
+  sta C
+  lda #(H + 4 * 14)
+  sta D
+  lda #(MSG + 4 * 4)
+  sta MX
+  lda #(MSG + 4 * 5)
+  sta MY
+  jsr g
+
+  ; g(state, 3, 7, 11, 15, m[6], m[7]);
+  lda #(H + 4 * 3)
+  sta A
+  lda #(H + 4 * 7)
+  sta B
+  lda #(H + 4 * 11)
+  sta C
+  lda #(H + 4 * 15)
+  sta D
+  lda #(MSG + 4 * 6)
+  sta MX
+  lda #(MSG + 4 * 7)
+  sta MY
+  jsr g
+
+  ; Mix the diagonals.
+
+  ; g(state, 0, 5, 10, 15, m[8], m[9]);
+  lda #(H + 4 * 0)
+  sta A
+  lda #(H + 4 * 5)
+  sta B
+  lda #(H + 4 * 10)
+  sta C
+  lda #(H + 4 * 15)
+  sta D
+  lda #(MSG + 4 * 8)
+  sta MX
+  lda #(MSG + 4 * 9)
+  sta MY
+  jsr g
+
+  ; g(state, 1, 6, 11, 12, m[10], m[11]);
+  lda #(H + 4 * 1)
+  sta A
+  lda #(H + 4 * 6)
+  sta B
+  lda #(H + 4 * 11)
+  sta C
+  lda #(H + 4 * 12)
+  sta D
+  lda #(MSG + 4 * 10)
+  sta MX
+  lda #(MSG + 4 * 11)
+  sta MY
+  jsr g
+
+  ; g(state, 2, 7, 8, 13, m[12], m[13]);
+  lda #(H + 4 * 2)
+  sta A
+  lda #(H + 4 * 7)
+  sta B
+  lda #(H + 4 * 8)
+  sta C
+  lda #(H + 4 * 13)
+  sta D
+  lda #(MSG + 4 * 12)
+  sta MX
+  lda #(MSG + 4 * 13)
+  sta MY
+  jsr g
+
+  ; g(state, 3, 4, 9, 14, m[14], m[15]);
+  lda #(H + 4 * 3)
+  sta A
+  lda #(H + 4 * 4)
+  sta B
+  lda #(H + 4 * 9)
+  sta C
+  lda #(H + 4 * 14)
+  sta D
+  lda #(MSG + 4 * 14)
+  sta MX
+  lda #(MSG + 4 * 15)
+  sta MY
+  jsr g
+
+  rts
+
+
 ; $02..08 are 1-byte word pointers: (a, b, c, d, mx, my)
-; note that $00..02 are needed by ror12_u32
+; Note that $00..02 are needed by ror12_u32.
 g:
   ; a = a + b + mx
   ldx A
