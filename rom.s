@@ -40,22 +40,23 @@ clear_loop:
   bne clear_loop
 
   ; put 0xaabbccdd at address 42
-  lda #$04
+  lda #$45
   sta 45
-  lda #$02
+  lda #$67
   sta 44
-  lda #$01
+  lda #$89
   sta 43
-  lda #$08
+  lda #$ab
   sta 42
 
   ldx #42
-  jsr ror8_u32
-  jsr print_hex_u32
-
-  jsr lcd_line_two
-
-  ldx #42
+  jsr ror7_u32
+  jsr ror7_u32
+  jsr ror7_u32
+  jsr ror7_u32
+  jsr ror7_u32
+  jsr ror7_u32
+  jsr ror7_u32
   jsr ror7_u32
   jsr print_hex_u32
 
@@ -174,11 +175,11 @@ ror8_u32:
 
   rts
 
-; *X >>>= 7, preserves X and Y, byte $00 is scratch
+; *X >>>= 7, preserves X
 ror7_u32:
-  ; save byte0 to $00
+  ; stash byte0 in Y
   lda $00, x
-  sta $00
+  tay
 
   ; load byte1 and distribute its bits
   lda $01, x
@@ -206,8 +207,8 @@ ror7_u32:
   adc #0      ; retrieve the high bit
   sta $03, x
 
-  ; load byte0 from scratch and distribute its bits
-  lda $00
+  ; retrieve byte0 from Y and distribute its bits
+  tya
   asl         ; the high bit is now in C
   ora $03, x
   sta $03, x
