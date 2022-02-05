@@ -1,11 +1,19 @@
+; IO controller constants
 PORTB = $6000
 PORTA = $6001
 DDRB = $6002
 DDRA = $6003
-
 E  = %10000000
 RW = %01000000
 RS = %00100000
+
+; G function constants
+A  = $02
+B  = $03
+C  = $04
+D  = $05
+MX = $06
+MY = $07
 
   .org $8000
 
@@ -31,37 +39,95 @@ main:
   jsr lcd_clear
 
   ; initialize the zero page with incrementing bytes
-  lda $00
-  ldx $00
-clear_loop:
+  lda #0
+  ldx #0
+init_zp_loop:
   txa
   sta $00, x
   inx
-  bne clear_loop
+  bne init_zp_loop
 
-  ; put 0xaabbccdd at address 42
-  lda #$45
-  sta 45
-  lda #$67
-  sta 44
-  lda #$89
-  sta 43
-  lda #$ab
-  sta 42
+  ; use the 24 bytes starting at address 100 for a, b, c, d, mx, my
+  ; these have incrementing values starting at 100
+  ; store their addresses in $02..08
+  lda #100
+  sta A
+  lda #104
+  sta B
+  lda #108
+  sta C
+  lda #112
+  sta D
+  lda #116
+  sta MX
+  lda #120
+  sta MY
 
-  ldx #42
-  jsr ror7_u32
-  jsr ror7_u32
-  jsr ror7_u32
-  jsr ror7_u32
-  jsr ror7_u32
-  jsr ror7_u32
-  jsr ror7_u32
-  jsr ror7_u32
+  ; mix these 6 ints with g()
+  jsr g
+
+  ; print a and b
+  ldx A
+  jsr print_hex_u32
+  jsr lcd_line_two
+  ldx B
   jsr print_hex_u32
 
 end_loop:
   jmp end_loop
+
+; $02..08 are 1-byte word pointers: (a, b, c, d, mx, my)
+; note that $00..02 are needed by ror12_u32
+g:
+  ; a = a + b + mx
+  ldx A
+  ldy B
+  jsr add_u32
+  ldy MX
+  jsr add_u32
+
+  ; d = (d ^ a) >>> 16
+  ldx D
+  ldy A
+  jsr xor_u32
+  jsr ror16_u32
+
+  ; c = c + d
+  ldx C
+  ldy D
+  jsr add_u32
+
+  ; b = (b ^ c) >>> 12
+  ldx B
+  ldy C
+  jsr xor_u32
+  jsr ror12_u32
+
+  ; a = a + b + my
+  ldx A
+  ldy B
+  jsr add_u32
+  ldy MY
+  jsr add_u32
+
+  ; d = (d ^ a) >>> 8
+  ldx D
+  ldy A
+  jsr xor_u32
+  jsr ror8_u32
+
+  ; c = c + d
+  ldx C
+  ldy D
+  jsr add_u32
+
+  ; b = (b ^ c) >>> 7
+  ldx B
+  ldy C
+  jsr xor_u32
+  jsr ror7_u32
+
+  rts
 
 ; *X >>>= 16, preserves X
 ror16_u32:
@@ -373,7 +439,7 @@ pause:
   pha
 
   ; tweak A here to adjust the pause
-  lda #1
+  lda #4
   ldx #0
   ldy #0
 pause_loop:
