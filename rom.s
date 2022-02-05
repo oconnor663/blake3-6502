@@ -23,6 +23,8 @@ C  = $04
 D  = $05
 MX = $06
 MY = $07
+; An array of 16 bytes, $08..18, each of which points into MSG
+MPTRS = $08
 
   .org $8000
 
@@ -48,7 +50,6 @@ main:
   jsr lcd_clear
 
   ; initialize the zero page with incrementing bytes
-  lda #0
   ldx #0
 init_zp_loop:
   txa
@@ -56,21 +57,105 @@ init_zp_loop:
   inx
   bne init_zp_loop
 
-  ; compress the state and message block we just initialized
-  jsr round
+  ; initialize MPTRS with 0..16
+  ldx #0
+init_mptrs_loop:
+  txa
+  sta MPTRS, x
+  inx
+  txa
+  cmp #16
+  bne init_mptrs_loop
 
-  ; print the first and second state words after compression
-  ldx #H
-  jsr print_hex_u32
+  ; first permutation
+  jsr permute
+
+  ; print MPTRS
+  ldx #0
+print_loop1:
+  lda MPTRS, x
+  jsr print_hex_nibble
+  inx
+  txa
+  cmp #16
+  bne print_loop1
+
+  ; second permutation
+  jsr permute
+
+  ; print MPTRS again
   jsr lcd_line_two
-  ldx #(H + 4)
-  jsr print_hex_u32
+  ldx #0
+print_loop2:
+  lda MPTRS, x
+  jsr print_hex_nibble
+  inx
+  txa
+  cmp #16
+  bne print_loop2
 
 end_loop:
   jmp end_loop
 
+permute:
+  ; Rather than permuting the 32-bit words stored in the MSG
+  ; array, we permute the 8-bit pointers stored in the MPTRS
+  ; array.
+  ; The permutation is defined to be:
+  ; 2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8
+  ; If we walk those assignments, we get two loops:
+  ; 0<-2<-3<-10<-12<-9<-11<-5<-0
+  ; 1<-6<-4<-7<-13<-14<-15<-8<-1
+
+  ; stash the m0 ptr in Y
+  ldy MPTRS + 0
+
+  ; walk the first assignment loop
+  lda MPTRS + 2
+  sta MPTRS + 0
+  lda MPTRS + 3
+  sta MPTRS + 2
+  lda MPTRS + 10
+  sta MPTRS + 3
+  lda MPTRS + 12
+  sta MPTRS + 10
+  lda MPTRS + 9
+  sta MPTRS + 12
+  lda MPTRS + 11
+  sta MPTRS + 9
+  lda MPTRS + 5
+  sta MPTRS + 11
+
+  ; finish the first loop with Y
+  sty MPTRS + 5
+
+  ; stash the m1 ptr in Y
+  ldy MPTRS + 1
+
+  ; walk the second assignment loop
+  lda MPTRS + 6
+  sta MPTRS + 1
+  lda MPTRS + 4
+  sta MPTRS + 6
+  lda MPTRS + 7
+  sta MPTRS + 4
+  lda MPTRS + 13
+  sta MPTRS + 7
+  lda MPTRS + 14
+  sta MPTRS + 13
+  lda MPTRS + 15
+  sta MPTRS + 14
+  lda MPTRS + 8
+  sta MPTRS + 15
+
+  ; finish the second loop with Y
+  sty MPTRS + 8
+
+  rts
+
 ; The top 128 bytes of the zero page are reserved for the
-; compression function state and message block. We don't
+; compression function state and message block. The MPTRS
+; array is also set up with the message permutation. We don't
 ; need any other arguments.
 round:
   ; Mix the columns.
@@ -84,9 +169,9 @@ round:
   sta C
   lda #(H + 4 * 12)
   sta D
-  lda #(MSG + 4 * 0)
+  lda MPTRS + 0
   sta MX
-  lda #(MSG + 4 * 1)
+  lda MPTRS + 1
   sta MY
   jsr g
 
@@ -99,9 +184,9 @@ round:
   sta C
   lda #(H + 4 * 13)
   sta D
-  lda #(MSG + 4 * 2)
+  lda MPTRS + 2
   sta MX
-  lda #(MSG + 4 * 3)
+  lda MPTRS + 3
   sta MY
   jsr g
 
@@ -114,9 +199,9 @@ round:
   sta C
   lda #(H + 4 * 14)
   sta D
-  lda #(MSG + 4 * 4)
+  lda MPTRS + 4
   sta MX
-  lda #(MSG + 4 * 5)
+  lda MPTRS + 5
   sta MY
   jsr g
 
@@ -129,9 +214,9 @@ round:
   sta C
   lda #(H + 4 * 15)
   sta D
-  lda #(MSG + 4 * 6)
+  lda MPTRS + 6
   sta MX
-  lda #(MSG + 4 * 7)
+  lda MPTRS + 7
   sta MY
   jsr g
 
@@ -146,9 +231,9 @@ round:
   sta C
   lda #(H + 4 * 15)
   sta D
-  lda #(MSG + 4 * 8)
+  lda MPTRS + 8
   sta MX
-  lda #(MSG + 4 * 9)
+  lda MPTRS + 9
   sta MY
   jsr g
 
@@ -161,9 +246,9 @@ round:
   sta C
   lda #(H + 4 * 12)
   sta D
-  lda #(MSG + 4 * 10)
+  lda MPTRS + 10
   sta MX
-  lda #(MSG + 4 * 11)
+  lda MPTRS + 11
   sta MY
   jsr g
 
@@ -176,9 +261,9 @@ round:
   sta C
   lda #(H + 4 * 13)
   sta D
-  lda #(MSG + 4 * 12)
+  lda MPTRS + 12
   sta MX
-  lda #(MSG + 4 * 13)
+  lda MPTRS + 13
   sta MY
   jsr g
 
@@ -191,9 +276,9 @@ round:
   sta C
   lda #(H + 4 * 14)
   sta D
-  lda #(MSG + 4 * 14)
+  lda MPTRS + 14
   sta MX
-  lda #(MSG + 4 * 15)
+  lda MPTRS + 15
   sta MY
   jsr g
 
@@ -439,6 +524,18 @@ xor_u32:
   sta $02, x
   lda $03, x
   eor $03, y
+  sta $03, x
+  rts
+
+; *X = *Y, preserves X and Y
+store_u32:
+  lda $00, y
+  sta $00, x
+  lda $01, y
+  sta $01, x
+  lda $02, y
+  sta $02, x
+  lda $03, y
   sta $03, x
   rts
 
