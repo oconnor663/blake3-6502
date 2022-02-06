@@ -1,11 +1,35 @@
-; IO controller constants
-PORTB = $6000
-PORTA = $6001
-DDRB = $6002
-DDRA = $6003
-E  = %10000000
-RW = %01000000
-RS = %00100000
+; ======================= Memory Map =======================
+; 00-02   scratch space or pointer arguments
+; 02-08   G function arguments
+; 08-18   permuted pointers into the message block
+; 18-80   [free]
+; 80-c0   state matrix
+; c0-100  message block
+; ==========================================================
+
+  ; Our ROM is mapped at address $8000.
+  .org $8000
+
+IV0_BYTES: .byte $67, $e6, $09, $6a
+IV1_BYTES: .byte $85, $ae, $67, $bb
+IV2_BYTES: .byte $72, $f3, $6e, $3c
+IV3_BYTES: .byte $3a, $f5, $4f, $a5
+IV4_BYTES: .byte $7f, $52, $0e, $51
+IV5_BYTES: .byte $8c, $68, $05, $9b
+IV6_BYTES: .byte $ab, $d9, $83, $1f
+IV7_BYTES: .byte $19, $cd, $e0, $5b
+
+; G function constants
+; These are scratch space slots for zp pointers.
+G_A  = $02
+G_B  = $03
+G_C  = $04
+G_D  = $05
+G_MX = $06
+G_MY = $07
+; An array of 16 bytes, $08..18, each of which points into
+; COMPRESS_MSG
+MPTRS = $08
 
 ; compression function constants
 ; The whole second half of the zero page is reserved for the
@@ -36,31 +60,9 @@ COMPRESS_T0  = H12
 COMPRESS_T1  = H13
 COMPRESS_B   = H14
 COMPRESS_D   = H15
+
 ; $c0..100 (64 bytes) is the message block.
 COMPRESS_MSG = $c0
-
-; G function constants
-; These are scratch space slots for zp pointers.
-G_A  = $02
-G_B  = $03
-G_C  = $04
-G_D  = $05
-G_MX = $06
-G_MY = $07
-; An array of 16 bytes, $08..18, each of which points into
-; COMPRESS_MSG
-MPTRS = $08
-
-  .org $8000
-
-IV0_BYTES: .byte $67, $e6, $09, $6a
-IV1_BYTES: .byte $85, $ae, $67, $bb
-IV2_BYTES: .byte $72, $f3, $6e, $3c
-IV3_BYTES: .byte $3a, $f5, $4f, $a5
-IV4_BYTES: .byte $7f, $52, $0e, $51
-IV5_BYTES: .byte $8c, $68, $05, $9b
-IV6_BYTES: .byte $ab, $d9, $83, $1f
-IV7_BYTES: .byte $19, $cd, $e0, $5b
 
 main:
   ldx #$ff        ; initialize the stack pointer
@@ -606,7 +608,20 @@ xor_u32:
   sta $03, x
   rts
 
-; preserves registers
+; ---------------------------
+; everything below is IO code
+; ---------------------------
+
+; IO controller constants
+PORTB = $6000
+PORTA = $6001
+DDRB = $6002
+DDRA = $6003
+E  = %10000000
+RW = %01000000
+RS = %00100000
+
+; preserves A, X, and Y
 lcd_wait:
   pha
   lda #%00000000  ; all pins port B to input
@@ -627,7 +642,7 @@ lcdbusy:
   pla
   rts
 
-; reads A
+; reads A, preserves X and Y
 lcd_instruction:
   jsr lcd_wait
   sta PORTB
@@ -639,17 +654,19 @@ lcd_instruction:
   sta PORTA
   rts
 
+; preserves X and Y
 lcd_clear:
   lda #%00000001  ; clear the display
   jsr lcd_instruction
   rts
 
+; preserves X and Y
 lcd_line_two:
   lda #%10101000  ; DDRAM address to byte 40
   jsr lcd_instruction
   rts
 
-; reads A
+; reads A, preserves X and Y
 print_char:
   jsr lcd_wait
   sta PORTB
@@ -661,7 +678,7 @@ print_char:
   sta PORTA
   rts
 
-; str pointer at $00
+; str pointer at $00, preserves X
 print_str:
   ldy #0
 print_str_loop:
@@ -702,7 +719,7 @@ print_hex_byte:
   jsr print_hex_nibble
   rts
 
-; prints *X, preserves X
+; prints *X, preserves X and Y
 print_hex_u32:
   lda #"0"
   jsr print_char
@@ -718,7 +735,7 @@ print_hex_u32:
   jsr print_hex_byte
   rts
 
-; preserves registers
+; preserves A, X, and Y
 pause:
   pha
   txa
