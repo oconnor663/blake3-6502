@@ -1,10 +1,21 @@
 ; ======================= Memory Map =======================
-; 00-02   scratch space or pointer arguments
-; 02-08   G function arguments
-; 08-18   permuted pointers into the message block
-; 18-80   [free]
-; 80-c0   state matrix
-; c0-100  message block
+; 00..02    scratch space or pointer arguments
+; 02..08    G function arguments
+; 08..18    permuted pointers into the message block
+; 18        chunk counter
+; 19        chunk counter for chunks, 0 for parent nodes
+; 1a        block length
+; 1b        block compressed in current chunk
+; 1c        bitflags for the next compression
+; 1d..1f    input ptr
+; 1f..21    input len
+; 21..24    pause scratch
+; 24        break flag
+; 25..80    [free]
+; 80..c0    state matrix
+; c0..100   message block
+; 100..200  [stack page]
+; 200...    test vector input pattern
 ; ==========================================================
 
   ; Our ROM is mapped at address $8000.
@@ -19,6 +30,11 @@ IV5_BYTES: .byte $8c, $68, $05, $9b
 IV6_BYTES: .byte $ab, $d9, $83, $1f
 IV7_BYTES: .byte $19, $cd, $e0, $5b
 
+INPUT_DONE_STRING: .asciiz "test input done"
+
+; two bytes of scratch space, or sometimes a pointer arg
+SCRATCH = $00
+
 ; G function constants
 ; These are scratch space slots for zp pointers.
 G_A  = $02
@@ -30,6 +46,23 @@ G_MY = $07
 ; An array of 16 bytes, $08..18, each of which points into
 ; COMPRESS_MSG
 MPTRS = $08
+
+; chunk state metadata
+CHUNK_COUNTER      = $18
+CHUNK_COUNTER_OR_0 = $19  ; must be 0 for parent nodes
+BLOCK_LENGTH       = $1a
+BLOCKS_COMPRESSED  = $1b
+DOMAIN_BITFLAGS    = $1c
+
+; inputs for hasher_update
+INPUT_PTR = $1d
+INPUT_LEN = $1f
+
+; 3 bytes of scratch space for the pause function
+PAUSE_SCRATCH = $21
+
+; set by BRK/IRQ and cleared by NMI
+BREAK_FLAG = $24
 
 ; compression function constants
 ; The whole second half of the zero page is reserved for the
@@ -64,6 +97,8 @@ COMPRESS_D   = H15
 ; $c0..100 (64 bytes) is the message block.
 COMPRESS_MSG = $c0
 
+TEST_VECTOR_INPUT_START = $200
+
 ; compression function bitflags
 ; Note that keying and key derivation aren't supported here.
 CHUNK_START = (1 << 0)
@@ -92,41 +127,277 @@ main:
 
   jsr lcd_clear
 
-  ; initialize the zero page with all null bytes
-  lda #0
+  ; populate the test vector input with 10 KiB of
+  ; 0,1,2,...,250,0,1... bytes
+  ; Reuse INPUT_PTR for the walking pointer.
+  lda #<TEST_VECTOR_INPUT_START
+  sta INPUT_PTR
+  lda #>TEST_VECTOR_INPUT_START
+  sta INPUT_PTR + 1
   ldx #0
-init_zp_loop:
-  dex
-  sta $00, x
-  bne init_zp_loop
-
-  ; set things up to hash the empty message
-
-  ; copy the IV bytes to H
-  ldx #0
-init_iv_loop:
-  lda IV0_BYTES, x
-  sta H0, x
+populate_input_loop:
+  txa
+  ldy #0
+  sta (INPUT_PTR), y
+  ; increment the pointer in INPUT_PTR
+  lda INPUT_PTR
+  clc
+  adc #1
+  sta INPUT_PTR
+  lda INPUT_PTR + 1
+  adc #0  ; add the carry bit
+  sta INPUT_PTR + 1
+  ; We want to write 40 pages. 42 accounts for the zero page
+  ; and the stack page.
+  cmp #(40 + 2)
+  beq populate_input_done
   inx
-  cpx #32
-  bne init_iv_loop
+  cpx #251
+  bne after_reset_paint
+  ldx #0
+after_reset_paint:
+  jmp populate_input_loop
+populate_input_done:
 
-  ; t0, t1, and b are already zeroed. set d here.
-  lda #(CHUNK_START | CHUNK_END | ROOT)
-  sta COMPRESS_D
+  lda #<INPUT_DONE_STRING
+  sta SCRATCH
+  lda #>INPUT_DONE_STRING
+  sta SCRATCH + 1
+  jsr print_str
 
-  ; compress the empty block
-  jsr compress
+  ; init the hash state
+  jsr hasher_init
 
+  ; set INPUT_PTR to point to TEST_VECTOR_INPUT_START
+  lda #<TEST_VECTOR_INPUT_START
+  sta INPUT_PTR
+  lda #>TEST_VECTOR_INPUT_START
+  sta INPUT_PTR + 1
+
+  ; set length 193
+  lda #<1023
+  sta INPUT_LEN
+  lda #>1023
+  sta INPUT_LEN + 1
+
+  ; add some input
+  jsr chunk_state_update
+
+  ; finalize
+  jsr chunk_state_finalize
+
+  ; Did we get it right?!
+  jsr print_hash
+
+  ; Now do it again for 1024.
+  lda #<TEST_VECTOR_INPUT_START
+  sta INPUT_PTR
+  lda #>TEST_VECTOR_INPUT_START
+  sta INPUT_PTR + 1
+  lda #<1024
+  sta INPUT_LEN
+  lda #>1024
+  sta INPUT_LEN + 1
+  jsr hasher_init
+  jsr chunk_state_update
+  jsr chunk_state_finalize
   jsr print_hash
 
 end_loop:
   jmp end_loop
 
-; This function (re)initializes the MPTRS array, and it sets
-; the IV constants into the third row of the state. The caller
-; needs to set H0..=H15, T0, T1, B, and D in the state, in
-; addition to the COMPRESS_MSG block.
+; TODO: currently this only handles one chunk
+hasher_init:
+  ; pre-initialize the chunk counter to $ff so that it rolls
+  ; over to $00 in next_chunk_state_init
+  lda #$ff
+  sta CHUNK_COUNTER
+  jsr next_chunk_state_init
+  rts
+
+; Chunk state initialization will:
+;   - increment the CHUNK_COUNTER
+;   - zero the BLOCK_LENGTH
+;   - zero the BLOCKS_COMPRESSED in this chunk
+;   - copy the 32 IV bytes to H
+;   - initialize DOMAIN_BITFLAGS to CHUNK_START
+; The chunk counter is only 8 bits in this implementation,
+; because our addressable memory can only fit 32 chunks, but
+; in theory we could increase it if we wanted to hash some
+; larger input in pieces. For the first chunk, we'll
+; initialize the chunk counter to $ff before calling this, and
+; it'll roll over.
+next_chunk_state_init:
+  inc CHUNK_COUNTER
+  lda #0
+  sta BLOCK_LENGTH
+  sta BLOCKS_COMPRESSED
+
+  ; set H to IV
+  ldx #0
+new_chunk_state_iv_bytes_loop:
+  lda IV0_BYTES, x
+  sta H0, x
+  inx
+  cpx #32
+  bne new_chunk_state_iv_bytes_loop
+
+  ; initialize DOMAIN_BITFLAGS
+  lda #CHUNK_START
+  sta DOMAIN_BITFLAGS
+
+  rts
+
+; Reads and modifies INPUT_PTR and INPUT_LEN
+chunk_state_update:
+  ; The logic here is
+  ;
+  ;   while input_len > 0:
+  ;     if the block is full, compress it and clear it;
+  ;     copy as much input as possible into the block buffer;
+
+  ; if input is empty, return
+  lda INPUT_LEN
+  ora INPUT_LEN + 1
+  bne chunk_state_update_nonempty
+  ; input is empty
+  rts
+chunk_state_update_nonempty:
+
+  ; if the block buffer isn't full, go to copy
+  lda BLOCK_LENGTH
+  cmp #64
+  bne chunk_state_update_copy
+
+  ; the block buffer is full, compress it
+  lda CHUNK_COUNTER
+  sta CHUNK_COUNTER_OR_0
+  jsr compress
+
+  ; update BLOCKS_COMPRESSED, and clear BLOCK_LENGTH and
+  ; DOMAIN_BITFLAGS (to remove CHUNK_START)
+  inc BLOCKS_COMPRESSED
+  lda #0
+  sta BLOCK_LENGTH
+  sta DOMAIN_BITFLAGS
+
+chunk_state_update_copy:
+  ; we need to copy the minimum of (64-BLOCK_LENGTH), which is
+  ; 8-bits, and INPUT_LEN, which is 16-bits.
+
+  ; The remaining buffer space is 64 - BLOCK_LENGTH. Write
+  ; this value to SCRATCH.
+  lda #64
+  sec
+  sbc BLOCK_LENGTH
+  sta SCRATCH
+
+  ; If the high byte of INPUT_LEN is non-zero, keep the
+  ; remaining buffer space in SCRATCH and jump to the loop
+  ; start.
+  lda INPUT_LEN + 1
+  bne chunk_state_update_copy_loop_start
+
+  ; Do the same if the remaining buffer space is less than the
+  ; low byte of INPUT_LEN.
+  ; NOTE: A big mistake I made here was trying to use `bmi` to
+  ; branch if the result of the subtraction is negative. That
+  ; appears to work until INPUT_LEN is large enough that the
+  ; result wraps back around to <=127. (So in this case it
+  ; goes wrong here when INPUT_LEN is 193.) `bcc` is the
+  ; reliable way to implement a less-than check.
+  lda SCRATCH
+  cmp INPUT_LEN
+  bcc chunk_state_update_copy_loop_start
+
+  ; Otherwise, this is the "input is shorter than remaining
+  ; buffer space" case. Overwrite SCRATCH with the low byte of
+  ; INPUT_LEN (the high byte must be zero here).
+  lda INPUT_LEN
+  sta SCRATCH
+
+  ; SCRATCH holds the number of bytes to copy from INPUT_PTR.
+  ; Use Y to do indirect indexing through INPUT_PTR (X does
+  ; not support this), and use X as a cursor in COMPRESS_MSG.
+chunk_state_update_copy_loop_start:
+  ldy #0
+  ldx BLOCK_LENGTH
+chunk_state_update_copy_loop_continue:
+  cpy SCRATCH
+  beq chunk_state_update_copy_loop_end
+  lda (INPUT_PTR), y
+  sta COMPRESS_MSG, x
+  inx
+  iny
+  jmp chunk_state_update_copy_loop_continue
+chunk_state_update_copy_loop_end:
+
+  ; X contains the new BLOCK_LENGTH. Store it.
+  stx BLOCK_LENGTH
+
+  ; SCRATCH contains the number of bytes just copied. Add
+  ; SCRATCH to INPUT_PTR and subtract it from INPUT_LEN.
+  lda INPUT_PTR
+  clc
+  adc SCRATCH
+  sta INPUT_PTR
+  lda INPUT_PTR + 1
+  adc #0  ; adds the carry bit
+  sta INPUT_PTR + 1
+  lda INPUT_LEN
+  sec
+  sbc SCRATCH
+  sta INPUT_LEN
+  lda INPUT_LEN + 1
+  sbc #0  ; subtracts the carry/borrow bit
+  sta INPUT_LEN + 1
+
+  ; go back to the top
+  jmp chunk_state_update
+
+chunk_state_update_end:
+  rts
+
+; Write zero padding to the block buffer, set the CHUNK_END
+; and ROOT flags, and compress.
+; TODO: handle multiple chunks, don't always set ROOT
+chunk_state_finalize:
+  ; write zero padding to the block buffer
+  ldx BLOCK_LENGTH
+chunk_state_finalize_padding_loop:
+  cpx #64
+  beq chunk_state_finalize_padding_loop_end
+  lda #0
+  sta COMPRESS_MSG, x
+  inx
+  jmp chunk_state_finalize_padding_loop
+chunk_state_finalize_padding_loop_end:
+
+  ; DOMAIN_BITFLAGS might currently contain CHUNK_START, or it
+  ; might not. Add CHUNK_END and ROOT to whatever its current
+  ; value is.
+  lda DOMAIN_BITFLAGS
+  ORA #(CHUNK_END | ROOT)
+  sta DOMAIN_BITFLAGS
+
+  ; Compress the final block.
+  lda CHUNK_COUNTER
+  sta CHUNK_COUNTER_OR_0
+  jsr compress
+
+  rts
+
+; Compression will first:
+;   - initialize the MPTRS array
+;   - set the IV constants in the third row of the state
+;   - set T0, T1, B, and D in the fourth row of the state
+; The caller needs to arrange:
+;   - the 32-byte CV in H0..=H7
+;   - the 64-byte block buffer at COMPRESS_MSG, including its
+;     zero padding
+;   - the value of BLOCK_LENGTH
+;   - the value of CHUNK_COUNTER_OR_0
+;   - the bitflags in DOMAIN_BITFLAGS
 compress:
   ; reinitialize MPTRS with COMPRESS_MSG, +4, +8, ...
   lda #COMPRESS_MSG
@@ -149,6 +420,28 @@ compress_iv_consts_loop:
   inx
   cpx #16
   bne compress_iv_consts_loop
+
+  ; set T0, T1, B, and D
+  lda #0
+  sta COMPRESS_T0 + 1
+  sta COMPRESS_T0 + 2
+  sta COMPRESS_T0 + 3
+  sta COMPRESS_T1 + 0
+  sta COMPRESS_T1 + 1
+  sta COMPRESS_T1 + 2
+  sta COMPRESS_T1 + 3
+  sta COMPRESS_B + 1
+  sta COMPRESS_B + 2
+  sta COMPRESS_B + 3
+  sta COMPRESS_D + 1
+  sta COMPRESS_D + 2
+  sta COMPRESS_D + 3
+  lda CHUNK_COUNTER_OR_0
+  sta COMPRESS_T0
+  lda BLOCK_LENGTH
+  sta COMPRESS_B
+  lda DOMAIN_BITFLAGS
+  sta COMPRESS_D
 
   ; compression rounds
   jsr round    ; round 1
@@ -456,13 +749,13 @@ ror16_u32:
   sta $03, x
   rts
 
-; *X >>>= 12, preserves registers, bytes $00..02 are scratch
+; *X >>>= 12, preserves X and Y, bytes $00..02 are scratch
 ror12_u32:
   ; copy byte0 and byte1
   lda $00, x
-  sta $00
+  sta SCRATCH
   lda $01, x
-  sta $01
+  sta SCRATCH + 1
 
   ; write byte0 lower nibble
   lda $01, x
@@ -504,7 +797,7 @@ ror12_u32:
   lsr
   sta $02, x
   ; write byte2 upper nibble, using scratch
-  lda $00
+  lda SCRATCH
   asl
   asl
   asl
@@ -513,14 +806,14 @@ ror12_u32:
   sta $02, x
 
   ; write byte2 lower nibble, using scratch
-  lda $00
+  lda SCRATCH
   lsr
   lsr
   lsr
   lsr
   sta $03, x
   ; write byte2 upper nibble, using scratch
-  lda $01
+  lda SCRATCH + 1
   asl
   asl
   asl
@@ -697,11 +990,11 @@ print_char:
   sta PORTA
   rts
 
-; str pointer at $00, preserves X
+; str pointer in SCRATCH, preserves X
 print_str:
   ldy #0
 print_str_loop:
-  lda ($0), y
+  lda (SCRATCH), y
   beq print_str_end
   jsr print_char
   iny
@@ -740,51 +1033,112 @@ print_hex_byte:
 
 ; prints *X, preserves X and Y
 print_hex_u32:
-  lda #"0"
-  jsr print_char
-  lda #"x"
-  jsr print_char
-  lda $03, x
-  jsr print_hex_byte
-  lda $02, x
+  lda $00, x
   jsr print_hex_byte
   lda $01, x
   jsr print_hex_byte
-  lda $00, x
+  lda $02, x
+  jsr print_hex_byte
+  lda $03, x
   jsr print_hex_byte
   rts
 
-; prints the state bytes H0..=H15
-; The display only has 16 chars per row, so we only print the
-; first 8 out of 32 bytes here.
+; prints the state bytes H0..=H3
 print_hash:
-  ldx #0
-print_hash_loop1:
-  lda H0, x
-  jsr print_hex_byte
-  inx
-  cpx #8
-  bne print_hash_loop1
-  jsr lcd_line_two
-  ldx #0
-print_hash_loop2:
-  lda H2, x
-  jsr print_hex_byte
-  inx
-  cpx #8
-  bne print_hash_loop2
+  ldx #H0
+  jsr print_state_row
   rts
 
-; preserves A, X, and Y
-pause:
+; X contains the starting address of the row (H0, H4, H8, H12)
+print_state_row:
+  jsr lcd_clear
+  jsr print_hex_u32
+  inx
+  inx
+  inx
+  inx
+  jsr print_hex_u32
+  inx
+  inx
+  inx
+  inx
+  jsr lcd_line_two
+  jsr print_hex_u32
+  inx
+  inx
+  inx
+  inx
+  jsr print_hex_u32
+  inx
+  inx
+  inx
+  inx
+  rts
+
+print_full_state:
+  ldx #H0
+print_full_state_loop:
+  jsr print_state_row
+  lda #4
+  jsr pause
+  jsr lcd_clear
+  lda #1
+  jsr pause
+  cpx #(H0 + 64)
+  bne print_full_state_loop
+
+  rts
+
+print_debug_info:
   pha
   txa
   pha
   tya
   pha
 
-  ; tweak A here to adjust the pause
+  jsr lcd_clear
+
+  lda #"d"
+  jsr print_char
+  lda #" "
+  jsr print_char
+
+  lda INPUT_PTR+1
+  jsr print_hex_byte
+  lda INPUT_PTR
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+
+  lda INPUT_LEN+1
+  jsr print_hex_byte
+  lda INPUT_LEN
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+
+  lda BLOCK_LENGTH
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+
   lda #4
+  jsr pause
+
+  pla
+  tay
+  pla
+  tax
+  pla
+  rts
+
+; A controls the pause duration, preserves A, X, and Y
+pause:
+  ; write A, X, and Y to PAUSE_SCRATCH
+  sta PAUSE_SCRATCH
+  stx PAUSE_SCRATCH + 1
+  sty PAUSE_SCRATCH + 2
+
   ldx #0
   ldy #0
 pause_loop:
@@ -800,13 +1154,34 @@ pause_loop:
   bne pause_loop
   ; if A reached 0, we're done
 
-  pla
-  tay
-  pla
-  tax
+  ; restore X and Y
+  lda PAUSE_SCRATCH
+  ldx PAUSE_SCRATCH + 1
+  ldy PAUSE_SCRATCH + 2
+  rts
+
+break:
+  pha
+  lda #1
+  sta BREAK_FLAG
+break_loop:
+  lda BREAK_FLAG
+  bne break_loop
+  ; we get here when NMI clears the BREAK_FLAG
   pla
   rts
 
-  .org $fffc
+irq:
+  rti
+
+nmi:
+  pha
+  lda #0
+  sta BREAK_FLAG
+  pla
+  rti
+
+  .org $fffa
+  .word nmi
   .word main
-  .word 0
+  .word irq
