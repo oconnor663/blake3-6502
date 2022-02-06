@@ -64,6 +64,13 @@ COMPRESS_D   = H15
 ; $c0..100 (64 bytes) is the message block.
 COMPRESS_MSG = $c0
 
+; compression function bitflags
+; Note that keying and key derivation aren't supported here.
+CHUNK_START = (1 << 0)
+CHUNK_END   = (1 << 1)
+PARENT      = (1 << 2)
+ROOT        = (1 << 3)
+
 main:
   ldx #$ff        ; initialize the stack pointer
   txs
@@ -93,13 +100,25 @@ init_zp_loop:
   sta $00, x
   bne init_zp_loop
 
+  ; set things up to hash the empty message
+
+  ; copy the IV bytes to H
+  ldx #0
+init_iv_loop:
+  lda IV0_BYTES, x
+  sta H0, x
+  inx
+  cpx #32
+  bne init_iv_loop
+
+  ; t0, t1, and b are already zeroed. set d here.
+  lda #(CHUNK_START | CHUNK_END | ROOT)
+  sta COMPRESS_D
+
+  ; compress the empty block
   jsr compress
 
-  ldx #H0
-  jsr print_hex_u32
-  jsr lcd_line_two
-  ldx #H1
-  jsr print_hex_u32
+  jsr print_hash
 
 end_loop:
   jmp end_loop
@@ -733,6 +752,27 @@ print_hex_u32:
   jsr print_hex_byte
   lda $00, x
   jsr print_hex_byte
+  rts
+
+; prints the state bytes H0..=H15
+; The display only has 16 chars per row, so we only print the
+; first 8 out of 32 bytes here.
+print_hash:
+  ldx #0
+print_hash_loop1:
+  lda H0, x
+  jsr print_hex_byte
+  inx
+  cpx #8
+  bne print_hash_loop1
+  jsr lcd_line_two
+  ldx #0
+print_hash_loop2:
+  lda H2, x
+  jsr print_hex_byte
+  inx
+  cpx #8
+  bne print_hash_loop2
   rts
 
 ; preserves A, X, and Y
