@@ -11,22 +11,56 @@ RS = %00100000
 ; The whole second half of the zero page is reserved for the
 ; compression function state and message block.
 ; $80..c0 (64 bytes) is the internal state.
-H = $80
+H0  = $80
+H1  = $84
+H2  = $88
+H3  = $8c
+H4  = $90
+H5  = $94
+H6  = $98
+H7  = $9c
+H8  = $a0
+H9  = $a4
+H10 = $a8
+H11 = $ac
+H12 = $b0
+H13 = $b4
+H14 = $b8
+H15 = $bc
+; These constants refer to 4-byte words within the state.
+COMPRESS_IV0 = H8
+COMPRESS_IV1 = H9
+COMPRESS_IV2 = H10
+COMPRESS_IV3 = H11
+COMPRESS_T0  = H12
+COMPRESS_T1  = H13
+COMPRESS_B   = H14
+COMPRESS_D   = H15
 ; $c0..100 (64 bytes) is the message block.
-MSG = $c0
+COMPRESS_MSG = $c0
 
 ; G function constants
 ; These are scratch space slots for zp pointers.
-A  = $02
-B  = $03
-C  = $04
-D  = $05
-MX = $06
-MY = $07
-; An array of 16 bytes, $08..18, each of which points into MSG
+G_A  = $02
+G_B  = $03
+G_C  = $04
+G_D  = $05
+G_MX = $06
+G_MY = $07
+; An array of 16 bytes, $08..18, each of which points into
+; COMPRESS_MSG
 MPTRS = $08
 
   .org $8000
+
+IV0_BYTES: .byte $67, $e6, $09, $6a
+IV1_BYTES: .byte $85, $ae, $67, $bb
+IV2_BYTES: .byte $72, $f3, $6e, $3c
+IV3_BYTES: .byte $3a, $f5, $4f, $a5
+IV4_BYTES: .byte $7f, $52, $0e, $51
+IV5_BYTES: .byte $8c, $68, $05, $9b
+IV6_BYTES: .byte $ab, $d9, $83, $1f
+IV7_BYTES: .byte $19, $cd, $e0, $5b
 
 main:
   ldx #$ff        ; initialize the stack pointer
@@ -49,60 +83,105 @@ main:
 
   jsr lcd_clear
 
-  ; initialize the zero page with incrementing bytes
+  ; initialize the zero page with all null bytes
+  lda #0
   ldx #0
 init_zp_loop:
-  txa
+  dex
   sta $00, x
-  inx
   bne init_zp_loop
 
-  ; initialize MPTRS with 0..16
-  ldx #0
-init_mptrs_loop:
-  txa
-  sta MPTRS, x
-  inx
-  txa
-  cmp #16
-  bne init_mptrs_loop
+  jsr compress
 
-  ; first permutation
-  jsr permute
-
-  ; print MPTRS
-  ldx #0
-print_loop1:
-  lda MPTRS, x
-  jsr print_hex_nibble
-  inx
-  txa
-  cmp #16
-  bne print_loop1
-
-  ; second permutation
-  jsr permute
-
-  ; print MPTRS again
+  ldx #H0
+  jsr print_hex_u32
   jsr lcd_line_two
-  ldx #0
-print_loop2:
-  lda MPTRS, x
-  jsr print_hex_nibble
-  inx
-  txa
-  cmp #16
-  bne print_loop2
+  ldx #H1
+  jsr print_hex_u32
 
 end_loop:
   jmp end_loop
 
+; This function (re)initializes the MPTRS array, and it sets
+; the IV constants into the third row of the state. The caller
+; needs to set H0..=H15, T0, T1, B, and D in the state, in
+; addition to the COMPRESS_MSG block.
+compress:
+  ; reinitialize MPTRS with COMPRESS_MSG, +4, +8, ...
+  lda #COMPRESS_MSG
+  ldx #0
+compress_init_mptrs_loop:
+  sta MPTRS, x
+  ; increment X by 1 and A by 4
+  inx
+  clc
+  adc #4
+  ; break when X reaches 16
+  cpx #16
+  bne compress_init_mptrs_loop
+
+  ; set IV constants in the third row of the state
+  ldx #0
+compress_iv_consts_loop:
+  lda IV0_BYTES, x
+  sta COMPRESS_IV0, x
+  inx
+  cpx #16
+  bne compress_iv_consts_loop
+
+  ; compression rounds
+  jsr round    ; round 1
+  jsr permute
+  jsr round    ; round 2
+  jsr permute
+  jsr round    ; round 3
+  jsr permute
+  jsr round    ; round 4
+  jsr permute
+  jsr round    ; round 5
+  jsr permute
+  jsr round    ; round 6
+  jsr permute
+  jsr round    ; round 7
+
+  ; XOR the second half into the first half. Note that this
+  ; implementation does *not* feed-forward into the second
+  ; half, so extended outputs aren't supported.
+  ldx #H0
+  ldy #H8
+  jsr xor_u32
+  ldx #H1
+  ldy #H9
+  jsr xor_u32
+  ldx #H2
+  ldy #H10
+  jsr xor_u32
+  ldx #H3
+  ldy #H11
+  jsr xor_u32
+  ldx #H4
+  ldy #H12
+  jsr xor_u32
+  ldx #H5
+  ldy #H13
+  jsr xor_u32
+  ldx #H6
+  ldy #H14
+  jsr xor_u32
+  ldx #H7
+  ldy #H15
+  jsr xor_u32
+
+  rts
+
 permute:
-  ; Rather than permuting the 32-bit words stored in the MSG
-  ; array, we permute the 8-bit pointers stored in the MPTRS
-  ; array.
+  ; Rather than permuting the 32-bit words stored in the
+  ; COMPRESS_MSG array, we permute the 8-bit pointers stored
+  ; in the MPTRS array.
+  ;
   ; The permutation is defined to be:
   ; 2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8
+  ;
   ; If we walk those assignments, we get two loops:
   ; 0<-2<-3<-10<-12<-9<-11<-5<-0
   ; 1<-6<-4<-7<-13<-14<-15<-8<-1
@@ -161,125 +240,125 @@ round:
   ; Mix the columns.
 
   ; g(state, 0, 4, 8, 12, m[0], m[1]);
-  lda #(H + 4 * 0)
-  sta A
-  lda #(H + 4 * 4)
-  sta B
-  lda #(H + 4 * 8)
-  sta C
-  lda #(H + 4 * 12)
-  sta D
+  lda #H0
+  sta G_A
+  lda #H4
+  sta G_B
+  lda #H8
+  sta G_C
+  lda #H12
+  sta G_D
   lda MPTRS + 0
-  sta MX
+  sta G_MX
   lda MPTRS + 1
-  sta MY
+  sta G_MY
   jsr g
 
   ; g(state, 1, 5, 9, 13, m[2], m[3]);
-  lda #(H + 4 * 1)
-  sta A
-  lda #(H + 4 * 5)
-  sta B
-  lda #(H + 4 * 9)
-  sta C
-  lda #(H + 4 * 13)
-  sta D
+  lda #H1
+  sta G_A
+  lda #H5
+  sta G_B
+  lda #H9
+  sta G_C
+  lda #H13
+  sta G_D
   lda MPTRS + 2
-  sta MX
+  sta G_MX
   lda MPTRS + 3
-  sta MY
+  sta G_MY
   jsr g
 
   ; g(state, 2, 6, 10, 14, m[4], m[5]);
-  lda #(H + 4 * 2)
-  sta A
-  lda #(H + 4 * 6)
-  sta B
-  lda #(H + 4 * 10)
-  sta C
-  lda #(H + 4 * 14)
-  sta D
+  lda #H2
+  sta G_A
+  lda #H6
+  sta G_B
+  lda #H10
+  sta G_C
+  lda #H14
+  sta G_D
   lda MPTRS + 4
-  sta MX
+  sta G_MX
   lda MPTRS + 5
-  sta MY
+  sta G_MY
   jsr g
 
   ; g(state, 3, 7, 11, 15, m[6], m[7]);
-  lda #(H + 4 * 3)
-  sta A
-  lda #(H + 4 * 7)
-  sta B
-  lda #(H + 4 * 11)
-  sta C
-  lda #(H + 4 * 15)
-  sta D
+  lda #H3
+  sta G_A
+  lda #H7
+  sta G_B
+  lda #H11
+  sta G_C
+  lda #H15
+  sta G_D
   lda MPTRS + 6
-  sta MX
+  sta G_MX
   lda MPTRS + 7
-  sta MY
+  sta G_MY
   jsr g
 
   ; Mix the diagonals.
 
   ; g(state, 0, 5, 10, 15, m[8], m[9]);
-  lda #(H + 4 * 0)
-  sta A
-  lda #(H + 4 * 5)
-  sta B
-  lda #(H + 4 * 10)
-  sta C
-  lda #(H + 4 * 15)
-  sta D
+  lda #H0
+  sta G_A
+  lda #H5
+  sta G_B
+  lda #H10
+  sta G_C
+  lda #H15
+  sta G_D
   lda MPTRS + 8
-  sta MX
+  sta G_MX
   lda MPTRS + 9
-  sta MY
+  sta G_MY
   jsr g
 
   ; g(state, 1, 6, 11, 12, m[10], m[11]);
-  lda #(H + 4 * 1)
-  sta A
-  lda #(H + 4 * 6)
-  sta B
-  lda #(H + 4 * 11)
-  sta C
-  lda #(H + 4 * 12)
-  sta D
+  lda #H1
+  sta G_A
+  lda #H6
+  sta G_B
+  lda #H11
+  sta G_C
+  lda #H12
+  sta G_D
   lda MPTRS + 10
-  sta MX
+  sta G_MX
   lda MPTRS + 11
-  sta MY
+  sta G_MY
   jsr g
 
   ; g(state, 2, 7, 8, 13, m[12], m[13]);
-  lda #(H + 4 * 2)
-  sta A
-  lda #(H + 4 * 7)
-  sta B
-  lda #(H + 4 * 8)
-  sta C
-  lda #(H + 4 * 13)
-  sta D
+  lda #H2
+  sta G_A
+  lda #H7
+  sta G_B
+  lda #H8
+  sta G_C
+  lda #H13
+  sta G_D
   lda MPTRS + 12
-  sta MX
+  sta G_MX
   lda MPTRS + 13
-  sta MY
+  sta G_MY
   jsr g
 
   ; g(state, 3, 4, 9, 14, m[14], m[15]);
-  lda #(H + 4 * 3)
-  sta A
-  lda #(H + 4 * 4)
-  sta B
-  lda #(H + 4 * 9)
-  sta C
-  lda #(H + 4 * 14)
-  sta D
+  lda #H3
+  sta G_A
+  lda #H4
+  sta G_B
+  lda #H9
+  sta G_C
+  lda #H14
+  sta G_D
   lda MPTRS + 14
-  sta MX
+  sta G_MX
   lda MPTRS + 15
-  sta MY
+  sta G_MY
   jsr g
 
   rts
@@ -289,50 +368,50 @@ round:
 ; Note that $00..02 are needed by ror12_u32.
 g:
   ; a = a + b + mx
-  ldx A
-  ldy B
+  ldx G_A
+  ldy G_B
   jsr add_u32
-  ldy MX
+  ldy G_MX
   jsr add_u32
 
   ; d = (d ^ a) >>> 16
-  ldx D
-  ldy A
+  ldx G_D
+  ldy G_A
   jsr xor_u32
   jsr ror16_u32
 
   ; c = c + d
-  ldx C
-  ldy D
+  ldx G_C
+  ldy G_D
   jsr add_u32
 
   ; b = (b ^ c) >>> 12
-  ldx B
-  ldy C
+  ldx G_B
+  ldy G_C
   jsr xor_u32
   jsr ror12_u32
 
   ; a = a + b + my
-  ldx A
-  ldy B
+  ldx G_A
+  ldy G_B
   jsr add_u32
-  ldy MY
+  ldy G_MY
   jsr add_u32
 
   ; d = (d ^ a) >>> 8
-  ldx D
-  ldy A
+  ldx G_D
+  ldy G_A
   jsr xor_u32
   jsr ror8_u32
 
   ; c = c + d
-  ldx C
-  ldy D
+  ldx G_C
+  ldy G_D
   jsr add_u32
 
   ; b = (b ^ c) >>> 7
-  ldx B
-  ldy C
+  ldx G_B
+  ldy G_C
   jsr xor_u32
   jsr ror7_u32
 
@@ -527,18 +606,6 @@ xor_u32:
   sta $03, x
   rts
 
-; *X = *Y, preserves X and Y
-store_u32:
-  lda $00, y
-  sta $00, x
-  lda $01, y
-  sta $01, x
-  lda $02, y
-  sta $02, x
-  lda $03, y
-  sta $03, x
-  rts
-
 ; preserves registers
 lcd_wait:
   pha
@@ -635,7 +702,7 @@ print_hex_byte:
   jsr print_hex_nibble
   rts
 
-; prints *X
+; prints *X, preserves X
 print_hex_u32:
   lda #"0"
   jsr print_char
