@@ -1,0 +1,13 @@
+When I forgot to connect the ground wire on the Arduino, I got crazy reads from
+the clock.
+
+Forgetting the RTS at the end of a function makes everything go crazy.
+
+I still constantly forget to use # for immediate values with LDA etc.
+
+The BRK instruction needs a NOP or similar after it, because it skips the next
+byte.
+
+When comparing two bytes, don't use BMI to check for negative, because the
+result of subtraction will wrap back around to positive when the difference is
+>128. Use BCC instead.
