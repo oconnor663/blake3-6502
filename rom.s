@@ -184,6 +184,7 @@ populate_input_done:
   jsr chunk_state_update
 
   ; finalize
+  lda #ROOT
   jsr chunk_state_finalize
 
   ; Did we get it right?!
@@ -200,6 +201,7 @@ populate_input_done:
   sta INPUT_LEN + 1
   jsr hasher_init
   jsr chunk_state_update
+  lda #ROOT
   jsr chunk_state_finalize
   jsr print_hash
 
@@ -358,10 +360,19 @@ chunk_state_update_copy_loop_end:
 chunk_state_update_end:
   rts
 
-; Write zero padding to the block buffer, set the CHUNK_END
-; and ROOT flags, and compress.
-; TODO: handle multiple chunks, don't always set ROOT
+; The caller must first set the A register to either 0
+; (non-root) or ROOT. This function writes zero padding to the
+; block buffer, sets the CHUNK_END flag, and calls compress.
 chunk_state_finalize:
+  ; The caller has set the A register to either 0 or ROOT.
+  ; DOMAIN_BITFLAGS contains either 0 or CHUNK_START.
+  ; Bitwise-or both of those values together, bitwise-or the
+  ; CHUNK_END flag in addition, and then write the reuslt to
+  ; DOMAIN_BITFLAGS.
+  ora DOMAIN_BITFLAGS
+  ora #CHUNK_END
+  sta DOMAIN_BITFLAGS
+
   ; write zero padding to the block buffer
   ldx BLOCK_LENGTH
 chunk_state_finalize_padding_loop:
@@ -372,13 +383,6 @@ chunk_state_finalize_padding_loop:
   inx
   jmp chunk_state_finalize_padding_loop
 chunk_state_finalize_padding_loop_end:
-
-  ; DOMAIN_BITFLAGS might currently contain CHUNK_START, or it
-  ; might not. Add CHUNK_END and ROOT to whatever its current
-  ; value is.
-  lda DOMAIN_BITFLAGS
-  ORA #(CHUNK_END | ROOT)
-  sta DOMAIN_BITFLAGS
 
   ; Compress the final block.
   lda CHUNK_COUNTER
