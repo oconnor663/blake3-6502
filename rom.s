@@ -220,6 +220,20 @@ populate_input_done:
   jsr hasher_finalize
   jsr print_hash
 
+  ; finally, compress an all-zero root parent node.
+  lda #4
+  jsr pause
+  lda #0
+  ldx #63
+zero_message_buffer_loop:
+  sta COMPRESS_MSG, x
+  dex
+  bpl zero_message_buffer_loop
+  ; message buffer zeroed
+  lda #ROOT
+  jsr compress_parent_block
+  jsr print_hash
+
 end_loop:
   jmp end_loop
 
@@ -329,13 +343,7 @@ chunk_state_init_next:
   sta CHUNK_LENGTH + 1
 
   ; set H to IV
-  ldx #0
-new_chunk_state_iv_bytes_loop:
-  lda IV0_BYTES, x
-  sta H0, x
-  inx
-  cpx #32
-  bne new_chunk_state_iv_bytes_loop
+  jsr set_h_to_iv
 
   ; initialize DOMAIN_BITFLAGS
   lda #CHUNK_START
@@ -502,6 +510,51 @@ chunk_state_finalize_padding_loop_end:
   sta CHUNK_COUNTER_OR_0
   jsr compress
 
+  rts
+
+; Sets CHUNK_COUNTER_OR_0 to CHUNK_COUNTER before compressing.
+; Note that chunk_state_init_next takes care of CHUNK_COUNTER
+; and the CHUNK_START bit in DOMAIN_BITFLAGS.
+compress_chunk_block:
+  lda CHUNK_COUNTER
+  sta CHUNK_COUNTER_OR_0
+  jsr compress
+
+; In addition to putting child CVs in the message block, the
+; caller must first set the A register to either 0 (non-root)
+; or ROOT. This function:
+;   - sets (A | PARENT) to DOMAIN_BITFLAGS
+;   - sets CHUNK_COUNTER_OR_0 to 0
+;   - sets BLOCK_LENGTH to 64
+;   - sets H to IV
+compress_parent_block:
+  ; The caller has set A to either 0 (non-root) or ROOT. Add
+  ; the PARENT flag and write to DOMAIN_BITFLAGS.
+  ora #PARENT;
+  sta DOMAIN_BITFLAGS
+
+  ; set CHUNK_COUNTER_OR_0 to 0
+  lda #0
+  sta CHUNK_COUNTER_OR_0
+
+  ; set BLOCK_LENGTH to 64
+  lda #64
+  sta BLOCK_LENGTH
+
+  ; load IV bytes into H
+  jsr set_h_to_iv
+
+  jsr compress
+  rts
+
+set_h_to_iv:
+  ldx #31
+set_h_to_iv_loop:
+  lda IV0_BYTES, x
+  sta H0, x
+  dex
+  ; continue until x is negative
+  bpl set_h_to_iv_loop
   rts
 
 ; Compression will first:
