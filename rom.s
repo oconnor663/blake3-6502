@@ -5,13 +5,18 @@
 ; 18        chunk counter
 ; 19        chunk counter for chunks, 0 for parent nodes
 ; 1a        block length
-; 1b        block compressed in current chunk
+; 1b        block compressed in current chunk (TODO: unused)
 ; 1c        bitflags for the next compression
 ; 1d..1f    input ptr
-; 1f..21    input len
-; 21..24    pause scratch
-; 24        break flag
-; 25..80    [free]
+; 1f..21    hasher input len
+; 21..23    chunk input len
+; 23..26    pause scratch
+; 26        break flag
+; 27        remaining block bytes
+; 29..2b    print string arg
+; 2b..2d    ror12 scratch
+; 2d..2f    chunk length
+; 2f..80    [free]
 ; 80..c0    state matrix
 ; c0..100   message block
 ; 100..200  [stack page]
@@ -51,18 +56,30 @@ MPTRS = $08
 CHUNK_COUNTER      = $18
 CHUNK_COUNTER_OR_0 = $19  ; must be 0 for parent nodes
 BLOCK_LENGTH       = $1a
-BLOCKS_COMPRESSED  = $1b
+BLOCKS_COMPRESSED  = $1b  ; TODO: unused
 DOMAIN_BITFLAGS    = $1c
 
 ; inputs for hasher_update
 INPUT_PTR = $1d
-INPUT_LEN = $1f
+HASHER_INPUT_LEN = $1f
+CHUNK_INPUT_LEN = $21
 
 ; 3 bytes of scratch space for the pause function
-PAUSE_SCRATCH = $21
+PAUSE_SCRATCH = $23
 
 ; set by BRK/IRQ and cleared by NMI
-BREAK_FLAG = $24
+BREAK_FLAG = $26
+
+REMAINING_BLOCK_BYTES = $27
+
+; two-byte pointer
+PRINT_STR_ARG = $29
+
+; two bytes
+ROR12_SCRATCH = $2b
+
+; two bytes
+CHUNK_LENGTH = $2d
 
 ; compression function constants
 ; The whole second half of the zero page is reserved for the
@@ -160,9 +177,9 @@ after_reset_paint:
 populate_input_done:
 
   lda #<INPUT_DONE_STRING
-  sta SCRATCH
+  sta PRINT_STR_ARG
   lda #>INPUT_DONE_STRING
-  sta SCRATCH + 1
+  sta PRINT_STR_ARG + 1
   jsr print_str
 
   ; init the hash state
@@ -176,16 +193,15 @@ populate_input_done:
 
   ; set length 193
   lda #<1023
-  sta INPUT_LEN
+  sta HASHER_INPUT_LEN
   lda #>1023
-  sta INPUT_LEN + 1
+  sta HASHER_INPUT_LEN + 1
 
   ; add some input
-  jsr chunk_state_update
+  jsr hasher_update
 
   ; finalize
-  lda #ROOT
-  jsr chunk_state_finalize
+  jsr hasher_finalize
 
   ; Did we get it right?!
   jsr print_hash
@@ -196,13 +212,12 @@ populate_input_done:
   lda #>TEST_VECTOR_INPUT_START
   sta INPUT_PTR + 1
   lda #<1024
-  sta INPUT_LEN
+  sta HASHER_INPUT_LEN
   lda #>1024
-  sta INPUT_LEN + 1
+  sta HASHER_INPUT_LEN + 1
   jsr hasher_init
-  jsr chunk_state_update
-  lda #ROOT
-  jsr chunk_state_finalize
+  jsr hasher_update
+  jsr hasher_finalize
   jsr print_hash
 
 end_loop:
@@ -211,16 +226,93 @@ end_loop:
 ; TODO: currently this only handles one chunk
 hasher_init:
   ; pre-initialize the chunk counter to $ff so that it rolls
-  ; over to $00 in next_chunk_state_init
+  ; over to $00 in chunk_state_init_next
   lda #$ff
   sta CHUNK_COUNTER
-  jsr next_chunk_state_init
+  jsr chunk_state_init_next
+  rts
+
+; reads INPUT_PTR and HASHER_INPUT_LEN
+; overwrites CHUNK_INPUT_LEN internally
+hasher_update:
+  ; The logic here is
+  ;
+  ;   while input length > 0:
+  ;     if the current chunk is full, finalize it and reset it;
+  ;     add as much input as possible into the current chunk;
+
+  ; if input is empty, return
+  lda HASHER_INPUT_LEN
+  ora HASHER_INPUT_LEN + 1
+  bne hasher_update_nonempty_input
+  ; input is empty
+  rts
+hasher_update_nonempty_input:
+
+  ; The chunk state is full when CHUNK_LENGTH == $0400 (1024).
+  lda CHUNK_LENGTH
+  bne hasher_update_chunk_not_full
+  lda CHUNK_LENGTH + 1
+  cmp #$04
+  bne hasher_update_chunk_not_full
+
+  ; If we get here, the chunk state is full. Finalize it, push
+  ; the new CV onto the CV stack, and reset the chunk state.
+  ; We know there's more input coming, so this is finalization
+  ; is non-root.
+  lda #0  ; non-root
+  jsr chunk_state_finalize
+  ; TODO jsr hasher_add_chunk_cv
+  jsr chunk_state_init_next
+
+hasher_update_chunk_not_full:
+  ; Either we just finalized the last chunk and initialized a
+  ; new empty one, or the chunk state was not full. Either
+  ; way, add as much input as possible to the current chunk.
+
+  ; initialize CHUNK_INPUT_LEN to $0400 (1024) minus
+  ; CHUNK_LENGTH.
+  lda #$00
+  sec
+  sbc CHUNK_LENGTH
+  sta CHUNK_INPUT_LEN
+  lda #$04
+  sbc CHUNK_LENGTH + 1  ; includes the carry/borrow flag
+  sta CHUNK_INPUT_LEN + 1
+
+  ; CHUNK_INPUT_LEN now contains the number of bytes needed to
+  ; fill the current chunk. However, if HASHER_INPUT_LEN is
+  ; less than CHUNK_INPUT_LEN, set CHUNK_INPUT_LEN to
+  ; HASHER_INPUT_LEN.
+  lda CHUNK_INPUT_LEN
+  sec
+  sbc HASHER_INPUT_LEN
+  lda CHUNK_INPUT_LEN + 1
+  sbc HASHER_INPUT_LEN + 1  ; includes the carry/borrow flag
+  bcc hasher_update_chunk_input_length_ready
+  ; If we get here, then HASHER_INPUT_LEN is <= CHUNK_LENGTH.
+  ; Set CHUNK_INPUT_LEN to HASHER_INPUT_LEN.
+  lda HASHER_INPUT_LEN
+  sta CHUNK_INPUT_LEN
+  lda HASHER_INPUT_LEN + 1
+  sta CHUNK_INPUT_LEN + 1
+
+hasher_update_chunk_input_length_ready:
+  jsr chunk_state_update
+  ; chunk_state_update updated INPUT_PTR, HASHER_INPUT_LEN,
+  ; and CHUNK_INPUT_LEN (which should now be zero).
+  jmp hasher_update  ; back to the top
+
+hasher_finalize:
+  ; TODO: roll up subtree CVs
+  lda #ROOT
+  jsr chunk_state_finalize
   rts
 
 ; Chunk state initialization will:
 ;   - increment the CHUNK_COUNTER
 ;   - zero the BLOCK_LENGTH
-;   - zero the BLOCKS_COMPRESSED in this chunk
+;   - zero the CHUNK_LENGTH
 ;   - copy the 32 IV bytes to H
 ;   - initialize DOMAIN_BITFLAGS to CHUNK_START
 ; The chunk counter is only 8 bits in this implementation,
@@ -229,11 +321,12 @@ hasher_init:
 ; larger input in pieces. For the first chunk, we'll
 ; initialize the chunk counter to $ff before calling this, and
 ; it'll roll over.
-next_chunk_state_init:
+chunk_state_init_next:
   inc CHUNK_COUNTER
   lda #0
   sta BLOCK_LENGTH
-  sta BLOCKS_COMPRESSED
+  sta CHUNK_LENGTH
+  sta CHUNK_LENGTH + 1
 
   ; set H to IV
   ldx #0
@@ -250,21 +343,22 @@ new_chunk_state_iv_bytes_loop:
 
   rts
 
-; Reads and modifies INPUT_PTR and INPUT_LEN
+; Reads INPUT_PTR and CHUNK_INPUT_LEN.
+; Modifies both of those and also HASHER_INPUT_LEN.
 chunk_state_update:
   ; The logic here is
   ;
-  ;   while input_len > 0:
+  ;   while input length > 0:
   ;     if the block is full, compress it and clear it;
   ;     copy as much input as possible into the block buffer;
 
   ; if input is empty, return
-  lda INPUT_LEN
-  ora INPUT_LEN + 1
-  bne chunk_state_update_nonempty
+  lda CHUNK_INPUT_LEN
+  ora CHUNK_INPUT_LEN + 1
+  bne chunk_state_update_nonempty_input
   ; input is empty
   rts
-chunk_state_update_nonempty:
+chunk_state_update_nonempty_input:
 
   ; if the block buffer isn't full, go to copy
   lda BLOCK_LENGTH
@@ -276,56 +370,64 @@ chunk_state_update_nonempty:
   sta CHUNK_COUNTER_OR_0
   jsr compress
 
-  ; update BLOCKS_COMPRESSED, and clear BLOCK_LENGTH and
+  ; update CHUNK_LENGTH, and clear BLOCK_LENGTH and
   ; DOMAIN_BITFLAGS (to remove CHUNK_START)
-  inc BLOCKS_COMPRESSED
+  lda CHUNK_LENGTH
+  clc
+  adc #64
+  sta CHUNK_LENGTH
+  lda CHUNK_LENGTH + 1
+  adc #0  ; add the carry bit
+  sta CHUNK_LENGTH + 1
   lda #0
   sta BLOCK_LENGTH
   sta DOMAIN_BITFLAGS
 
 chunk_state_update_copy:
   ; we need to copy the minimum of (64-BLOCK_LENGTH), which is
-  ; 8-bits, and INPUT_LEN, which is 16-bits.
+  ; 8-bits, and CHUNK_INPUT_LEN, which is 16-bits.
 
   ; The remaining buffer space is 64 - BLOCK_LENGTH. Write
-  ; this value to SCRATCH.
+  ; this value to REMAINING_BLOCK_BYTES.
   lda #64
   sec
   sbc BLOCK_LENGTH
-  sta SCRATCH
+  sta REMAINING_BLOCK_BYTES
 
-  ; If the high byte of INPUT_LEN is non-zero, keep the
-  ; remaining buffer space in SCRATCH and jump to the loop
-  ; start.
-  lda INPUT_LEN + 1
+  ; If the high byte of CHUNK_INPUT_LEN is non-zero, keep the
+  ; remaining buffer space in REMAINING_BLOCK_BYTES and jump
+  ; to the loop start.
+  lda CHUNK_INPUT_LEN + 1
   bne chunk_state_update_copy_loop_start
 
   ; Do the same if the remaining buffer space is less than the
-  ; low byte of INPUT_LEN.
-  ; NOTE: A big mistake I made here was trying to use `bmi` to
+  ; low byte of CHUNK_INPUT_LEN.
+  ; NOTE: A big mistake I made here was trying to use BMI to
   ; branch if the result of the subtraction is negative. That
-  ; appears to work until INPUT_LEN is large enough that the
-  ; result wraps back around to <=127. (So in this case it
-  ; goes wrong here when INPUT_LEN is 193.) `bcc` is the
+  ; appears to work until CHUNK_INPUT_LEN is large enough that
+  ; the result wraps back around to <=127. (So in this case it
+  ; goes wrong here when CHUNK_INPUT_LEN is 193.) BCC is the
   ; reliable way to implement a less-than check.
-  lda SCRATCH
-  cmp INPUT_LEN
+  lda REMAINING_BLOCK_BYTES
+  cmp CHUNK_INPUT_LEN
   bcc chunk_state_update_copy_loop_start
 
   ; Otherwise, this is the "input is shorter than remaining
-  ; buffer space" case. Overwrite SCRATCH with the low byte of
-  ; INPUT_LEN (the high byte must be zero here).
-  lda INPUT_LEN
-  sta SCRATCH
+  ; buffer space" case. Overwrite REMAINING_BLOCK_BYTES with
+  ; the low byte of CHUNK_INPUT_LEN (the high byte must be
+  ; zero here).
+  lda CHUNK_INPUT_LEN
+  sta REMAINING_BLOCK_BYTES
 
-  ; SCRATCH holds the number of bytes to copy from INPUT_PTR.
-  ; Use Y to do indirect indexing through INPUT_PTR (X does
-  ; not support this), and use X as a cursor in COMPRESS_MSG.
+  ; REMAINING_BLOCK_BYTES holds the number of bytes to copy
+  ; from INPUT_PTR. Use Y to do indirect indexing through
+  ; INPUT_PTR (X does not support this), and use X as a cursor
+  ; in COMPRESS_MSG.
 chunk_state_update_copy_loop_start:
   ldy #0
   ldx BLOCK_LENGTH
 chunk_state_update_copy_loop_continue:
-  cpy SCRATCH
+  cpy REMAINING_BLOCK_BYTES
   beq chunk_state_update_copy_loop_end
   lda (INPUT_PTR), y
   sta COMPRESS_MSG, x
@@ -337,22 +439,33 @@ chunk_state_update_copy_loop_end:
   ; X contains the new BLOCK_LENGTH. Store it.
   stx BLOCK_LENGTH
 
-  ; SCRATCH contains the number of bytes just copied. Add
-  ; SCRATCH to INPUT_PTR and subtract it from INPUT_LEN.
+  ; REMAINING_BLOCK_BYTES contains the number of bytes just
+  ; copied. Add REMAINING_BLOCK_BYTES to INPUT_PTR and
+  ; subtract it from both CHUNK_INPUT_LEN and
+  ; HASHER_INPUT_LEN.
   lda INPUT_PTR
   clc
-  adc SCRATCH
+  adc REMAINING_BLOCK_BYTES
   sta INPUT_PTR
   lda INPUT_PTR + 1
   adc #0  ; adds the carry bit
   sta INPUT_PTR + 1
-  lda INPUT_LEN
+
+  lda CHUNK_INPUT_LEN
   sec
-  sbc SCRATCH
-  sta INPUT_LEN
-  lda INPUT_LEN + 1
+  sbc REMAINING_BLOCK_BYTES
+  sta CHUNK_INPUT_LEN
+  lda CHUNK_INPUT_LEN + 1
   sbc #0  ; subtracts the carry/borrow bit
-  sta INPUT_LEN + 1
+  sta CHUNK_INPUT_LEN + 1
+
+  lda HASHER_INPUT_LEN
+  sec
+  sbc REMAINING_BLOCK_BYTES
+  sta HASHER_INPUT_LEN
+  lda HASHER_INPUT_LEN + 1
+  sbc #0  ; subtracts the carry/borrow bit
+  sta HASHER_INPUT_LEN + 1
 
   ; go back to the top
   jmp chunk_state_update
@@ -753,13 +866,13 @@ ror16_u32:
   sta $03, x
   rts
 
-; *X >>>= 12, preserves X and Y, bytes $00..02 are scratch
+; *X >>>= 12, preserves X and Y
 ror12_u32:
   ; copy byte0 and byte1
   lda $00, x
-  sta SCRATCH
+  sta ROR12_SCRATCH
   lda $01, x
-  sta SCRATCH + 1
+  sta ROR12_SCRATCH + 1
 
   ; write byte0 lower nibble
   lda $01, x
@@ -800,8 +913,8 @@ ror12_u32:
   lsr
   lsr
   sta $02, x
-  ; write byte2 upper nibble, using scratch
-  lda SCRATCH
+  ; write byte2 upper nibble, using ROR12_SCRATCH
+  lda ROR12_SCRATCH
   asl
   asl
   asl
@@ -809,15 +922,15 @@ ror12_u32:
   ora $02, x
   sta $02, x
 
-  ; write byte2 lower nibble, using scratch
-  lda SCRATCH
+  ; write byte2 lower nibble, using ROR12_SCRATCH
+  lda ROR12_SCRATCH
   lsr
   lsr
   lsr
   lsr
   sta $03, x
-  ; write byte2 upper nibble, using scratch
-  lda SCRATCH + 1
+  ; write byte2 upper nibble, using ROR12_SCRATCH
+  lda ROR12_SCRATCH + 1
   asl
   asl
   asl
@@ -994,11 +1107,11 @@ print_char:
   sta PORTA
   rts
 
-; str pointer in SCRATCH, preserves X
+; str pointer in PRINT_STR_ARG, preserves X
 print_str:
   ldy #0
 print_str_loop:
-  lda (SCRATCH), y
+  lda (PRINT_STR_ARG), y
   beq print_str_end
   jsr print_char
   iny
@@ -1114,9 +1227,9 @@ print_debug_info:
   lda #" "
   jsr print_char
 
-  lda INPUT_LEN+1
+  lda HASHER_INPUT_LEN+1
   jsr print_hex_byte
-  lda INPUT_LEN
+  lda HASHER_INPUT_LEN
   jsr print_hex_byte
   lda #" "
   jsr print_char
