@@ -17,7 +17,8 @@
 ; 2b..2d      ror12 scratch
 ; 2d..2f      chunk length
 ; 2f..31      cv stack pointer
-; 31..80      [free]
+; 31..33      test input lengths pointer
+; 33..80      [free]
 ; 80..c0      state matrix
 ; c0..100     message block
 ; 100..200    [stack page]
@@ -38,7 +39,43 @@ IV5_BYTES: .byte $8c, $68, $05, $9b
 IV6_BYTES: .byte $ab, $d9, $83, $1f
 IV7_BYTES: .byte $19, $cd, $e0, $5b
 
-INPUT_DONE_STRING: .asciiz "test input done"
+INPUT_LENGTH_STRING: .asciiz "input len: "
+
+TEST_INPUT_LENGTHS_START:
+  .word 0
+  .word 1
+  .word 2
+  .word 3
+  .word 4
+  .word 5
+  .word 6
+  .word 7
+  .word 8
+  .word 63
+  .word 64
+  .word 65
+  .word 127
+  .word 128
+  .word 129
+  .word 1023
+  .word 1024
+  .word 1025
+  .word 2048
+  .word 2049
+  .word 3072
+  .word 3073
+  .word 4096
+  .word 4097
+  .word 5120
+  .word 5121
+  .word 6144
+  .word 6145
+  .word 7168
+  .word 7169
+  .word 8192
+  .word 8193
+TEST_INPUT_LENGTHS_END:
+  .word 0
 
 ; two bytes of scratch space, or sometimes a pointer arg
 SCRATCH = $00
@@ -86,6 +123,9 @@ CHUNK_LENGTH = $2d
 
 ; two bytes, pointing to just after the last CV in the stack
 CV_STACK_PTR = $2f
+
+; two bytes, pointing to just after the last CV in the stack
+TEST_INPUT_LEN_PTR = $31
 
 ; compression function constants
 ; The whole second half of the zero page is reserved for the
@@ -197,31 +237,67 @@ after_reset_paint:
   jmp populate_input_loop
 populate_input_done:
 
-  lda #<INPUT_DONE_STRING
-  sta PRINT_STR_ARG
-  lda #>INPUT_DONE_STRING
-  sta PRINT_STR_ARG + 1
-  jsr print_str
-
-  ; Hash the 7169-byte test vector input in two pieces.
-  jsr hasher_init
+  ; Loop over each of the test input lengths.
+  lda #<TEST_INPUT_LENGTHS_START
+  sta TEST_INPUT_LEN_PTR
+  lda #>TEST_INPUT_LENGTHS_START
+  sta TEST_INPUT_LEN_PTR + 1
+hash_test_inputs_loop:
+  ; Check whether we've reached TEST_INPUT_LENGTHS_END.
+  lda TEST_INPUT_LEN_PTR
+  cmp #<TEST_INPUT_LENGTHS_END
+  bne hash_test_inputs_loop_keep_going
+  lda TEST_INPUT_LEN_PTR + 1
+  cmp #>TEST_INPUT_LENGTHS_END
+  bne hash_test_inputs_loop_keep_going
+  ; If we get here, the whole program is done.
+  jmp end_loop
+hash_test_inputs_loop_keep_going:
+  ; Set up the input pointer and length.
   lda #<TEST_INPUT_START
   sta INPUT_PTR
   lda #>TEST_INPUT_START
   sta INPUT_PTR + 1
-  lda #<3169
+  ldy #0
+  lda (TEST_INPUT_LEN_PTR), y
   sta HASHER_INPUT_LEN
-  lda #>3169
+  iny
+  lda (TEST_INPUT_LEN_PTR), y
   sta HASHER_INPUT_LEN + 1
-  jsr hasher_update
-  ; INPUT_PTR has been bumped forward.
-  lda #<4000
-  sta HASHER_INPUT_LEN
-  lda #>4000
-  sta HASHER_INPUT_LEN + 1
+
+  ; Print the input length to the first row of the LCD.
+  jsr lcd_clear
+  lda #<INPUT_LENGTH_STRING
+  sta PRINT_STR_ARG
+  lda #>INPUT_LENGTH_STRING
+  sta PRINT_STR_ARG + 1
+  jsr print_str
+  lda HASHER_INPUT_LEN + 1
+  jsr print_hex_byte
+  lda HASHER_INPUT_LEN
+  jsr print_hex_byte
+  jsr lcd_line_two
+
+  ; Hash this input.
+  jsr hasher_init
   jsr hasher_update
   jsr hasher_finalize
+
+  ; Print the first 16 hex chars of the hash to the second row.
   jsr print_hash
+  lda #4
+  jsr pause
+
+  ; Increment TEST_INPUT_LEN_PTR.
+  lda TEST_INPUT_LEN_PTR
+  clc
+  adc #2
+  sta TEST_INPUT_LEN_PTR
+  lda TEST_INPUT_LEN_PTR + 1
+  adc #0  ; includes the carry bit
+  sta TEST_INPUT_LEN_PTR + 1
+  ; Continue the test inputs loop.
+  jmp hash_test_inputs_loop
 
 end_loop:
   jmp end_loop
@@ -1390,7 +1466,12 @@ print_hex_u32:
 ; prints the state bytes H0..=H3
 print_hash:
   ldx #H0
-  jsr print_state_row
+  jsr print_hex_u32
+  inx
+  inx
+  inx
+  inx
+  jsr print_hex_u32
   rts
 
 
