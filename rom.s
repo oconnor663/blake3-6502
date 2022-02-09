@@ -1,26 +1,29 @@
 ; ======================= Memory Map =======================
-; 00..02    scratch space or pointer arguments
-; 02..08    G function arguments
-; 08..18    permuted pointers into the message block
-; 18        chunk counter
-; 19        chunk counter for chunks, 0 for parent nodes
-; 1a        block length
-; 1b        block compressed in current chunk (TODO: unused)
-; 1c        bitflags for the next compression
-; 1d..1f    input ptr
-; 1f..21    hasher input len
-; 21..23    chunk input len
-; 23..26    pause scratch
-; 26        break flag
-; 27        remaining block bytes
-; 29..2b    print string arg
-; 2b..2d    ror12 scratch
-; 2d..2f    chunk length
-; 2f..80    [free]
-; 80..c0    state matrix
-; c0..100   message block
-; 100..200  [stack page]
-; 200...    test vector input pattern
+; 00..02      scratch space or pointer arguments
+; 02..08      G function arguments
+; 08..18      permuted pointers into the message block
+; 18          chunk counter
+; 19          chunk counter for chunks, 0 for parent nodes
+; 1a          block length
+; 1b          block compressed in current chunk (TODO: unused)
+; 1c          bitflags for the next compression
+; 1d..1f      input ptr
+; 1f..21      hasher input len
+; 21..23      chunk input len
+; 23..26      pause scratch
+; 26          break flag
+; 27          block bytes to copy
+; 29..2b      print string arg
+; 2b..2d      ror12 scratch
+; 2d..2f      chunk length
+; 2f..31      cv stack pointer
+; 31..80      [free]
+; 80..c0      state matrix
+; c0..100     message block
+; 100..200    [stack page]
+; 200..8c0    cv stack (32 * 54 = 1728 bytes)
+; 8c0...30c0  test vector input with repeating pattern (10 KiB)
+; 30c0..4000  [free]
 ; ==========================================================
 
   ; Our ROM is mapped at address $8000.
@@ -70,7 +73,7 @@ PAUSE_SCRATCH = $23
 ; set by BRK/IRQ and cleared by NMI
 BREAK_FLAG = $26
 
-REMAINING_BLOCK_BYTES = $27
+BLOCK_BYTES_TO_COPY = $27
 
 ; two-byte pointer
 PRINT_STR_ARG = $29
@@ -80,6 +83,9 @@ ROR12_SCRATCH = $2b
 
 ; two bytes
 CHUNK_LENGTH = $2d
+
+; two bytes, pointing to just after the last CV in the stack
+CV_STACK_PTR = $2f
 
 ; compression function constants
 ; The whole second half of the zero page is reserved for the
@@ -114,7 +120,22 @@ COMPRESS_D   = H15
 ; $c0..100 (64 bytes) is the message block.
 COMPRESS_MSG = $c0
 
-TEST_VECTOR_INPUT_START = $200
+; The chaining value stack ("CV stack") has space for 54 CVs, 32 bytes
+; each: 54 * 32 = 1728 = $06c0
+; $0200 + $06c0 = $08c0
+;
+; Allocating a full CV stack here is excessive, since we only have 64
+; KiB of addressable memory, and the tree depth of a 64 KiB input is six
+; (much less than 54). In other places in this implementation, like the
+; 8-bit CHUNK_COUNTER, we do take advantage of this known maximum input
+; size to simplify things. However, allocating a full CV stack here is a
+; demonstration that BLAKE3's space overhead isn't too bad, even for the
+; 6502.
+CV_STACK_START = $200
+CV_STACK_CAPACITY_END = CV_STACK_START + (54 * 32)
+
+TEST_INPUT_START = CV_STACK_CAPACITY_END
+TEST_INPUT_END   = TEST_INPUT_START + (10 * 1024)
 
 ; compression function bitflags
 ; Note that keying and key derivation aren't supported here.
@@ -147,9 +168,9 @@ main:
   ; populate the test vector input with 10 KiB of
   ; 0,1,2,...,250,0,1... bytes
   ; Reuse INPUT_PTR for the walking pointer.
-  lda #<TEST_VECTOR_INPUT_START
+  lda #<TEST_INPUT_START
   sta INPUT_PTR
-  lda #>TEST_VECTOR_INPUT_START
+  lda #>TEST_INPUT_START
   sta INPUT_PTR + 1
   ldx #0
 populate_input_loop:
@@ -182,69 +203,196 @@ populate_input_done:
   sta PRINT_STR_ARG + 1
   jsr print_str
 
-  ; init the hash state
-  jsr hasher_init
-
-  ; set INPUT_PTR to point to TEST_VECTOR_INPUT_START
-  lda #<TEST_VECTOR_INPUT_START
+  ; Now do it again for 1025.
+  lda #<TEST_INPUT_START
   sta INPUT_PTR
-  lda #>TEST_VECTOR_INPUT_START
+  lda #>TEST_INPUT_START
   sta INPUT_PTR + 1
-
-  ; set length 193
-  lda #<1023
+  lda #<1025
   sta HASHER_INPUT_LEN
-  lda #>1023
-  sta HASHER_INPUT_LEN + 1
-
-  ; add some input
-  jsr hasher_update
-
-  ; finalize
-  jsr hasher_finalize
-
-  ; Did we get it right?!
-  jsr print_hash
-
-  ; Now do it again for 1024.
-  lda #<TEST_VECTOR_INPUT_START
-  sta INPUT_PTR
-  lda #>TEST_VECTOR_INPUT_START
-  sta INPUT_PTR + 1
-  lda #<1024
-  sta HASHER_INPUT_LEN
-  lda #>1024
+  lda #>1025
   sta HASHER_INPUT_LEN + 1
   jsr hasher_init
   jsr hasher_update
   jsr hasher_finalize
-  jsr print_hash
-
-  ; finally, compress an all-zero root parent node.
-  lda #4
-  jsr pause
-  lda #0
-  ldx #63
-zero_message_buffer_loop:
-  sta COMPRESS_MSG, x
-  dex
-  bpl zero_message_buffer_loop
-  ; message buffer zeroed
-  lda #ROOT
-  jsr compress_parent_block
   jsr print_hash
 
 end_loop:
   jmp end_loop
 
-; TODO: currently this only handles one chunk
+
 hasher_init:
-  ; pre-initialize the chunk counter to $ff so that it rolls
-  ; over to $00 in chunk_state_init_next
+  ; Pre-initialize the chunk counter to $ff so that it rolls over to $00
+  ; in chunk_state_init_next.
   lda #$ff
   sta CHUNK_COUNTER
   jsr chunk_state_init_next
+  ; Initialize the CV_STACK_PTR to CV_STACK_START.
+  lda #<CV_STACK_START
+  sta CV_STACK_PTR
+  lda #>CV_STACK_START
+  sta CV_STACK_PTR + 1
   rts
+
+
+; pushes the CV stored at H0..=H7 and moves up CV_STACK_PTR
+hasher_push_stack:
+  ; Copy the new CV.
+  ldy #31
+hasher_push_stack_loop:
+  lda H0, y
+  sta (CV_STACK_PTR), y
+  dey
+  ; Continue until Y is negative.
+  bpl hasher_push_stack_loop
+
+  ; The copy is done. Increment CV_STACK_PTR and return.
+  lda CV_STACK_PTR
+  clc
+  adc #32
+  sta CV_STACK_PTR
+  lda CV_STACK_PTR + 1
+  adc #0  ; includes the carry bit
+  sta CV_STACK_PTR + 1
+  rts
+
+
+; decrements CV_STACK_PTR and copies the popped CV into the left half of
+; the message block
+hasher_pop_stack:
+
+  jsr lcd_clear
+  lda #"p"
+  jsr print_char
+  lda #"o"
+  jsr print_char
+  lda #"p"
+  jsr print_char
+  lda #" "
+  jsr print_char
+  lda #>CV_STACK_START
+  jsr print_hex_byte
+  lda #<CV_STACK_START
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda CV_STACK_PTR + 1
+  jsr print_hex_byte
+  lda CV_STACK_PTR
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda #4
+  jsr pause
+
+  ; Decrement CV_STACK_PTR.
+  lda CV_STACK_PTR
+  sec
+  sbc #32
+  sta CV_STACK_PTR
+  lda CV_STACK_PTR + 1
+  sbc #0  ; includes the carry/borrow bit
+  sta CV_STACK_PTR + 1
+
+  ; Copy the popped CV into the left half of the message block.
+  ldy #31
+hasher_pop_stack_loop:
+  lda (CV_STACK_PTR), y
+  sta COMPRESS_MSG, y
+  dey
+  ; Continue until Y is negative.
+  bpl hasher_pop_stack_loop
+  rts
+
+
+; Copy the current CV stored at H0..=H7 into the right half of the
+; message block. This is used in both hasher_add_chunk_cv and
+; hasher_finalize.
+copy_current_cv_to_message_block:
+  ldy #31
+copy_current_cv_to_message_block_loop:
+  lda H0, y
+  sta COMPRESS_MSG + 32, y
+  dey
+  ; Continue until Y is negative.
+  bpl copy_current_cv_to_message_block_loop
+  rts
+
+
+; adds the chunk CV stored at H0..=H7 into the hash tree
+;
+; This chunk might complete some subtrees. For each completed subtree,
+; its left child will be the current top CV in the CV stack, and its
+; right child will be the CV currently in H0..=H7. Thus for each
+; completed subtree, pop its left child off the stack and into the
+; message buffer, copy the current CV into the other half of the message
+; buffer, and compress to merge them, overwriting the current CV in the
+; process. After all these merges, push the final value of H0..=H7 onto
+; the stack. The number of completed subtrees is given by the number of
+; trailing 1-bits in the previous number of chunks.
+;
+; Section 5.1.2 of the BLAKE3 spec explains this algorithm in more
+; detail.
+hasher_add_chunk_cv:
+  ; In pseudocode this is:
+  ;
+  ;   for each trailing 1 in chunk_counter:
+  ;     pop cv
+  ;     copy H0..=H7 to message block
+  ;     compress parent
+  ;   push cv
+
+  ; Initialize A with the current (not yet incremented) value of
+  ; CHUNK_COUNTER. We'll bitshift this value one place to the right in
+  ; each iteration of this loop.
+  lda CHUNK_COUNTER
+hasher_add_chunk_cv_loop:
+  ; Save a copy of A to the stack. We'll restore it when we get to the
+  ; bitshift below.
+  pha
+
+  ; If the low bit of A is zero, we're done.
+  and #%00000001
+  beq hasher_add_chunk_cv_end
+
+  ; Otherwise, we need to do a merge. First, copy the current CV into
+  ; the right half of the message buffer.
+  jsr copy_current_cv_to_message_block
+
+  ; Next, pop the top CV off the stack. It gets copied into the left
+  ; half of the message buffer.
+  jsr hasher_pop_stack
+
+  jsr lcd_clear
+  lda #"u"
+  jsr print_char
+  lda #"p"
+  jsr print_char
+  lda #" "
+  jsr print_char
+  lda CHUNK_COUNTER
+  jsr print_hex_byte
+  lda #4
+  jsr pause
+
+  ; Do a parent block compression to merge them. A=0 here indicates this
+  ; is a non-root compression.
+  lda #0
+  jsr compress_parent_block
+
+  ; Restore the previous value of A from the stack, shift it one bit to
+  ; the right, and loop back.
+  pla
+  lsr
+  jmp hasher_add_chunk_cv_loop
+
+hasher_add_chunk_cv_end:
+  ; Clean up the copy of A that's still on the stack.
+  pla
+  ; Push the fully merged CV.
+  jsr hasher_push_stack
+  rts
+
 
 ; reads INPUT_PTR and HASHER_INPUT_LEN
 ; overwrites CHUNK_INPUT_LEN internally
@@ -270,13 +418,27 @@ hasher_update_nonempty_input:
   cmp #$04
   bne hasher_update_chunk_not_full
 
+  jsr lcd_clear
+  lda #"c"
+  jsr print_char
+  lda #"s"
+  jsr print_char
+  lda #"f"
+  jsr print_char
+  lda #" "
+  jsr print_char
+  lda CHUNK_COUNTER
+  jsr print_hex_byte
+  lda #4
+  jsr pause
+
   ; If we get here, the chunk state is full. Finalize it, push
   ; the new CV onto the CV stack, and reset the chunk state.
   ; We know there's more input coming, so this is finalization
   ; is non-root.
   lda #0  ; non-root
   jsr chunk_state_finalize
-  ; TODO jsr hasher_add_chunk_cv
+  jsr hasher_add_chunk_cv
   jsr chunk_state_init_next
 
 hasher_update_chunk_not_full:
@@ -312,16 +474,183 @@ hasher_update_chunk_not_full:
   sta CHUNK_INPUT_LEN + 1
 
 hasher_update_chunk_input_length_ready:
+  jsr lcd_clear
+  lda #"c"
+  jsr print_char
+  lda #"s"
+  jsr print_char
+  lda #"u"
+  jsr print_char
+  lda #" "
+  jsr print_char
+  lda INPUT_PTR + 1
+  jsr print_hex_byte
+  lda INPUT_PTR
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda CHUNK_COUNTER
+  jsr print_hex_byte
+  jsr lcd_line_two
+  lda HASHER_INPUT_LEN + 1
+  jsr print_hex_byte
+  lda HASHER_INPUT_LEN
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda CHUNK_INPUT_LEN + 1
+  jsr print_hex_byte
+  lda CHUNK_INPUT_LEN
+  jsr print_hex_byte
+  lda #4
+  jsr pause
+
   jsr chunk_state_update
   ; chunk_state_update updated INPUT_PTR, HASHER_INPUT_LEN,
   ; and CHUNK_INPUT_LEN (which should now be zero).
+
+  jsr lcd_clear
+  lda #"a"
+  jsr print_char
+  lda #"f"
+  jsr print_char
+  lda #"t"
+  jsr print_char
+  lda #"e"
+  jsr print_char
+  lda #"r"
+  jsr print_char
+  lda #" "
+  jsr print_char
+  lda INPUT_PTR + 1
+  jsr print_hex_byte
+  lda INPUT_PTR
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda CHUNK_LENGTH + 1
+  jsr print_hex_byte
+  lda CHUNK_LENGTH
+  jsr print_hex_byte
+  jsr lcd_line_two
+  lda HASHER_INPUT_LEN + 1
+  jsr print_hex_byte
+  lda HASHER_INPUT_LEN
+  jsr print_hex_byte
+  lda #" "
+  jsr print_char
+  lda CHUNK_INPUT_LEN + 1
+  jsr print_hex_byte
+  lda CHUNK_INPUT_LEN
+  jsr print_hex_byte
+  lda #4
+  jsr pause
+
   jmp hasher_update  ; back to the top
 
+
+; If the current chunk is the only chunk (CHUNK_COUNTER == 0), then
+; root-finalize it and return. Otherwise, non-root-finalize it, and then
+; merge each of the CVs in the CV stack. The final merge is the root.
+; This ends up computing all the parent nodes on the right edge of the
+; hash tree.
 hasher_finalize:
-  ; TODO: roll up subtree CVs
+  ; If this is the only chunk, root-finalize it and return.
+  lda CHUNK_COUNTER
+  bne hasher_finalize_stack_nonempty
+
+  jsr lcd_clear
+  lda #"f"
+  jsr print_char
+  lda #"r"
+  jsr print_char
+  lda #"c"
+  jsr print_char
+  lda #" "
+  jsr print_char
+  lda CHUNK_COUNTER
+  jsr print_hex_byte
+  lda #4
+  jsr pause
+
   lda #ROOT
   jsr chunk_state_finalize
   rts
+hasher_finalize_stack_nonempty:
+  ; We need to do merges along the right edge of the tree. First
+  ; finalize the current chunk as non-root.
+
+  jsr lcd_clear
+  lda #"f"
+  jsr print_char
+  lda #"n"
+  jsr print_char
+  lda #"c"
+  jsr print_char
+  lda #" "
+  jsr print_char
+  lda CHUNK_COUNTER
+  jsr print_hex_byte
+  lda #4
+  jsr pause
+
+  lda #0  ; non-root
+  jsr chunk_state_finalize
+  ; Pop and merge all the entries in the CV stack. The final one is the
+  ; root.
+hasher_finalize_merge_loop:
+  jsr copy_current_cv_to_message_block
+  jsr hasher_pop_stack
+  ; We've just popped a CV from the stack into the message buffer. If
+  ; the stack is now empty (CV_STACK_PTR == CV_STACK_START), break out
+  ; of this loop to merge as root. Otherwise merge as non-root and
+  ; continue the loop.
+  lda CV_STACK_PTR
+  cmp #<CV_STACK_START
+  bne hasher_finalize_merge_loop_nonroot
+  lda CV_STACK_PTR + 1
+  cmp #>CV_STACK_START
+  bne hasher_finalize_merge_loop_nonroot
+
+  jsr lcd_clear
+  lda #"f"
+  jsr print_char
+  lda #"r"
+  jsr print_char
+  lda #"p"
+  jsr print_char
+  lda #" "
+  jsr print_char
+  lda CHUNK_COUNTER
+  jsr print_hex_byte
+  lda #4
+  jsr pause
+
+  ; Finalize as root and return.
+  lda #ROOT
+  jsr compress_parent_block
+  rts
+hasher_finalize_merge_loop_nonroot:
+
+  jsr lcd_clear
+  lda #"f"
+  jsr print_char
+  lda #"n"
+  jsr print_char
+  lda #"p"
+  jsr print_char
+  lda #" "
+  jsr print_char
+  lda CHUNK_COUNTER
+  jsr print_hex_byte
+  lda #4
+  jsr pause
+
+  ; Finalize as non-root and continue the loop.
+  lda #0  ; non-root
+  jsr compress_parent_block
+  jmp hasher_finalize_merge_loop
+
 
 ; Chunk state initialization will:
 ;   - increment the CHUNK_COUNTER
@@ -351,6 +680,7 @@ chunk_state_init_next:
 
   rts
 
+
 ; Reads INPUT_PTR and CHUNK_INPUT_LEN.
 ; Modifies both of those and also HASHER_INPUT_LEN.
 chunk_state_update:
@@ -378,15 +708,7 @@ chunk_state_update_nonempty_input:
   sta CHUNK_COUNTER_OR_0
   jsr compress
 
-  ; update CHUNK_LENGTH, and clear BLOCK_LENGTH and
-  ; DOMAIN_BITFLAGS (to remove CHUNK_START)
-  lda CHUNK_LENGTH
-  clc
-  adc #64
-  sta CHUNK_LENGTH
-  lda CHUNK_LENGTH + 1
-  adc #0  ; add the carry bit
-  sta CHUNK_LENGTH + 1
+  ; clear BLOCK_LENGTH and DOMAIN_BITFLAGS (to remove CHUNK_START)
   lda #0
   sta BLOCK_LENGTH
   sta DOMAIN_BITFLAGS
@@ -396,14 +718,14 @@ chunk_state_update_copy:
   ; 8-bits, and CHUNK_INPUT_LEN, which is 16-bits.
 
   ; The remaining buffer space is 64 - BLOCK_LENGTH. Write
-  ; this value to REMAINING_BLOCK_BYTES.
+  ; this value to BLOCK_BYTES_TO_COPY.
   lda #64
   sec
   sbc BLOCK_LENGTH
-  sta REMAINING_BLOCK_BYTES
+  sta BLOCK_BYTES_TO_COPY
 
   ; If the high byte of CHUNK_INPUT_LEN is non-zero, keep the
-  ; remaining buffer space in REMAINING_BLOCK_BYTES and jump
+  ; remaining buffer space in BLOCK_BYTES_TO_COPY and jump
   ; to the loop start.
   lda CHUNK_INPUT_LEN + 1
   bne chunk_state_update_copy_loop_start
@@ -416,18 +738,18 @@ chunk_state_update_copy:
   ; the result wraps back around to <=127. (So in this case it
   ; goes wrong here when CHUNK_INPUT_LEN is 193.) BCC is the
   ; reliable way to implement a less-than check.
-  lda REMAINING_BLOCK_BYTES
+  lda BLOCK_BYTES_TO_COPY
   cmp CHUNK_INPUT_LEN
   bcc chunk_state_update_copy_loop_start
 
   ; Otherwise, this is the "input is shorter than remaining
-  ; buffer space" case. Overwrite REMAINING_BLOCK_BYTES with
+  ; buffer space" case. Overwrite BLOCK_BYTES_TO_COPY with
   ; the low byte of CHUNK_INPUT_LEN (the high byte must be
   ; zero here).
   lda CHUNK_INPUT_LEN
-  sta REMAINING_BLOCK_BYTES
+  sta BLOCK_BYTES_TO_COPY
 
-  ; REMAINING_BLOCK_BYTES holds the number of bytes to copy
+  ; BLOCK_BYTES_TO_COPY holds the number of bytes to copy
   ; from INPUT_PTR. Use Y to do indirect indexing through
   ; INPUT_PTR (X does not support this), and use X as a cursor
   ; in COMPRESS_MSG.
@@ -435,7 +757,7 @@ chunk_state_update_copy_loop_start:
   ldy #0
   ldx BLOCK_LENGTH
 chunk_state_update_copy_loop_continue:
-  cpy REMAINING_BLOCK_BYTES
+  cpy BLOCK_BYTES_TO_COPY
   beq chunk_state_update_copy_loop_end
   lda (INPUT_PTR), y
   sta COMPRESS_MSG, x
@@ -447,21 +769,28 @@ chunk_state_update_copy_loop_end:
   ; X contains the new BLOCK_LENGTH. Store it.
   stx BLOCK_LENGTH
 
-  ; REMAINING_BLOCK_BYTES contains the number of bytes just
-  ; copied. Add REMAINING_BLOCK_BYTES to INPUT_PTR and
-  ; subtract it from both CHUNK_INPUT_LEN and
-  ; HASHER_INPUT_LEN.
+  ; BLOCK_BYTES_TO_COPY contains the number of bytes just copied. Add
+  ; BLOCK_BYTES_TO_COPY to both INPUT_PTR and CHUNK_LENGTH and subtract
+  ; it from both CHUNK_INPUT_LEN and HASHER_INPUT_LEN.
   lda INPUT_PTR
   clc
-  adc REMAINING_BLOCK_BYTES
+  adc BLOCK_BYTES_TO_COPY
   sta INPUT_PTR
   lda INPUT_PTR + 1
   adc #0  ; adds the carry bit
   sta INPUT_PTR + 1
 
+  lda CHUNK_LENGTH
+  clc
+  adc BLOCK_BYTES_TO_COPY
+  sta CHUNK_LENGTH
+  lda CHUNK_LENGTH + 1
+  adc #0  ; adds the carry bit
+  sta CHUNK_LENGTH + 1
+
   lda CHUNK_INPUT_LEN
   sec
-  sbc REMAINING_BLOCK_BYTES
+  sbc BLOCK_BYTES_TO_COPY
   sta CHUNK_INPUT_LEN
   lda CHUNK_INPUT_LEN + 1
   sbc #0  ; subtracts the carry/borrow bit
@@ -469,7 +798,7 @@ chunk_state_update_copy_loop_end:
 
   lda HASHER_INPUT_LEN
   sec
-  sbc REMAINING_BLOCK_BYTES
+  sbc BLOCK_BYTES_TO_COPY
   sta HASHER_INPUT_LEN
   lda HASHER_INPUT_LEN + 1
   sbc #0  ; subtracts the carry/borrow bit
@@ -478,8 +807,6 @@ chunk_state_update_copy_loop_end:
   ; go back to the top
   jmp chunk_state_update
 
-chunk_state_update_end:
-  rts
 
 ; The caller must first set the A register to either 0
 ; (non-root) or ROOT. This function writes zero padding to the
@@ -511,6 +838,7 @@ chunk_state_finalize_padding_loop_end:
   jsr compress
 
   rts
+
 
 ; Sets CHUNK_COUNTER_OR_0 to CHUNK_COUNTER before compressing.
 ; Note that chunk_state_init_next takes care of CHUNK_COUNTER
@@ -547,6 +875,7 @@ compress_parent_block:
   jsr compress
   rts
 
+
 set_h_to_iv:
   ldx #31
 set_h_to_iv_loop:
@@ -556,6 +885,7 @@ set_h_to_iv_loop:
   ; continue until x is negative
   bpl set_h_to_iv_loop
   rts
+
 
 ; Compression will first:
 ;   - initialize the MPTRS array
@@ -658,6 +988,7 @@ compress_iv_consts_loop:
 
   rts
 
+
 permute:
   ; Rather than permuting the 32-bit words stored in the
   ; COMPRESS_MSG array, we permute the 8-bit pointers stored
@@ -715,6 +1046,7 @@ permute:
   sty MPTRS + 8
 
   rts
+
 
 ; The top 128 bytes of the zero page are reserved for the
 ; compression function state and message block. The MPTRS
@@ -901,6 +1233,7 @@ g:
 
   rts
 
+
 ; *X >>>= 16, preserves X
 ror16_u32:
   ; swap *(X + 0) and *(X + 2)
@@ -918,6 +1251,7 @@ ror16_u32:
   tya
   sta $03, x
   rts
+
 
 ; *X >>>= 12, preserves X and Y
 ror12_u32:
@@ -993,6 +1327,7 @@ ror12_u32:
 
   rts
 
+
 ; *X >>>= 8, preserves X
 ror8_u32:
   ; stash byte0 in Y
@@ -1012,6 +1347,7 @@ ror8_u32:
   sta $03, x
 
   rts
+
 
 ; *X >>>= 7, preserves X
 ror7_u32:
@@ -1057,6 +1393,7 @@ ror7_u32:
 
   rts
 
+
 ; *X += *Y, preserves X and Y
 add_u32:
   clc
@@ -1074,6 +1411,7 @@ add_u32:
   sta $03, x
   rts
 
+
 ; *X ^= *Y, preserves X and Y
 xor_u32:
   lda $00, x
@@ -1089,6 +1427,7 @@ xor_u32:
   eor $03, y
   sta $03, x
   rts
+
 
 ; ---------------------------
 ; everything below is IO code
@@ -1124,6 +1463,7 @@ lcdbusy:
   pla
   rts
 
+
 ; reads A, preserves X and Y
 lcd_instruction:
   jsr lcd_wait
@@ -1136,17 +1476,20 @@ lcd_instruction:
   sta PORTA
   rts
 
+
 ; preserves X and Y
 lcd_clear:
   lda #%00000001  ; clear the display
   jsr lcd_instruction
   rts
 
+
 ; preserves X and Y
 lcd_line_two:
   lda #%10101000  ; DDRAM address to byte 40
   jsr lcd_instruction
   rts
+
 
 ; reads A, preserves X and Y
 print_char:
@@ -1160,6 +1503,7 @@ print_char:
   sta PORTA
   rts
 
+
 ; str pointer in PRINT_STR_ARG, preserves X
 print_str:
   ldy #0
@@ -1171,6 +1515,7 @@ print_str_loop:
   jmp print_str_loop
 print_str_end:
   rts
+
 
 ; reads A
 print_hex_nibble:
@@ -1188,6 +1533,7 @@ print_hex_nibble_end:
   jsr print_char
   rts
 
+
 ; reads A
 print_hex_byte:
   pha
@@ -1201,6 +1547,7 @@ print_hex_byte:
   jsr print_hex_nibble
   rts
 
+
 ; prints *X, preserves X and Y
 print_hex_u32:
   lda $00, x
@@ -1213,11 +1560,13 @@ print_hex_u32:
   jsr print_hex_byte
   rts
 
+
 ; prints the state bytes H0..=H3
 print_hash:
   ldx #H0
   jsr print_state_row
   rts
+
 
 ; X contains the starting address of the row (H0, H4, H8, H12)
 print_state_row:
@@ -1245,6 +1594,7 @@ print_state_row:
   inx
   rts
 
+
 print_full_state:
   ldx #H0
 print_full_state_loop:
@@ -1258,6 +1608,7 @@ print_full_state_loop:
   bne print_full_state_loop
 
   rts
+
 
 print_debug_info:
   pha
@@ -1302,6 +1653,7 @@ print_debug_info:
   pla
   rts
 
+
 ; A controls the pause duration, preserves A, X, and Y
 pause:
   ; write A, X, and Y to PAUSE_SCRATCH
@@ -1330,6 +1682,7 @@ pause_loop:
   ldy PAUSE_SCRATCH + 2
   rts
 
+
 break:
   pha
   lda #1
@@ -1340,6 +1693,7 @@ break_loop:
   ; we get here when NMI clears the BREAK_FLAG
   pla
   rts
+
 
 irq:
   rti
