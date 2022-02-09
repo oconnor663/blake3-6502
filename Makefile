@@ -1,12 +1,8 @@
-vasm:
-	vasm6502_oldstyle -Fbin -dotdir -esc rom.s && \
-		minipro --device AT28C256 --write a.out
+flash: a.out
+	minipro --device AT28C256 --write a.out
 
-dump:
-	vasm6502_oldstyle -Fbin -dotdir -esc rom.s && \
-		hexdump -C a.out
+dump: a.out
+	hexdump -C a.out
 
-raw:
-	./make_rom.py && \
-		hexdump -C rom.bin && \
-		minipro --device AT28C256 --write rom.bin
+a.out: rom.s
+	vasm6502_oldstyle -Fbin -dotdir -esc rom.s
