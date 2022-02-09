@@ -203,16 +203,22 @@ populate_input_done:
   sta PRINT_STR_ARG + 1
   jsr print_str
 
-  ; Now do it again for 1025.
+  ; Hash the 7169-byte test vector input in two pieces.
+  jsr hasher_init
   lda #<TEST_INPUT_START
   sta INPUT_PTR
   lda #>TEST_INPUT_START
   sta INPUT_PTR + 1
-  lda #<1025
+  lda #<3169
   sta HASHER_INPUT_LEN
-  lda #>1025
+  lda #>3169
   sta HASHER_INPUT_LEN + 1
-  jsr hasher_init
+  jsr hasher_update
+  ; INPUT_PTR has been bumped forward.
+  lda #<4000
+  sta HASHER_INPUT_LEN
+  lda #>4000
+  sta HASHER_INPUT_LEN + 1
   jsr hasher_update
   jsr hasher_finalize
   jsr print_hash
@@ -260,31 +266,6 @@ hasher_push_stack_loop:
 ; decrements CV_STACK_PTR and copies the popped CV into the left half of
 ; the message block
 hasher_pop_stack:
-
-  jsr lcd_clear
-  lda #"p"
-  jsr print_char
-  lda #"o"
-  jsr print_char
-  lda #"p"
-  jsr print_char
-  lda #" "
-  jsr print_char
-  lda #>CV_STACK_START
-  jsr print_hex_byte
-  lda #<CV_STACK_START
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda CV_STACK_PTR + 1
-  jsr print_hex_byte
-  lda CV_STACK_PTR
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda #4
-  jsr pause
-
   ; Decrement CV_STACK_PTR.
   lda CV_STACK_PTR
   sec
@@ -363,18 +344,6 @@ hasher_add_chunk_cv_loop:
   ; half of the message buffer.
   jsr hasher_pop_stack
 
-  jsr lcd_clear
-  lda #"u"
-  jsr print_char
-  lda #"p"
-  jsr print_char
-  lda #" "
-  jsr print_char
-  lda CHUNK_COUNTER
-  jsr print_hex_byte
-  lda #4
-  jsr pause
-
   ; Do a parent block compression to merge them. A=0 here indicates this
   ; is a non-root compression.
   lda #0
@@ -418,20 +387,6 @@ hasher_update_nonempty_input:
   cmp #$04
   bne hasher_update_chunk_not_full
 
-  jsr lcd_clear
-  lda #"c"
-  jsr print_char
-  lda #"s"
-  jsr print_char
-  lda #"f"
-  jsr print_char
-  lda #" "
-  jsr print_char
-  lda CHUNK_COUNTER
-  jsr print_hex_byte
-  lda #4
-  jsr pause
-
   ; If we get here, the chunk state is full. Finalize it, push
   ; the new CV onto the CV stack, and reset the chunk state.
   ; We know there's more input coming, so this is finalization
@@ -474,78 +429,9 @@ hasher_update_chunk_not_full:
   sta CHUNK_INPUT_LEN + 1
 
 hasher_update_chunk_input_length_ready:
-  jsr lcd_clear
-  lda #"c"
-  jsr print_char
-  lda #"s"
-  jsr print_char
-  lda #"u"
-  jsr print_char
-  lda #" "
-  jsr print_char
-  lda INPUT_PTR + 1
-  jsr print_hex_byte
-  lda INPUT_PTR
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda CHUNK_COUNTER
-  jsr print_hex_byte
-  jsr lcd_line_two
-  lda HASHER_INPUT_LEN + 1
-  jsr print_hex_byte
-  lda HASHER_INPUT_LEN
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda CHUNK_INPUT_LEN + 1
-  jsr print_hex_byte
-  lda CHUNK_INPUT_LEN
-  jsr print_hex_byte
-  lda #4
-  jsr pause
-
   jsr chunk_state_update
   ; chunk_state_update updated INPUT_PTR, HASHER_INPUT_LEN,
   ; and CHUNK_INPUT_LEN (which should now be zero).
-
-  jsr lcd_clear
-  lda #"a"
-  jsr print_char
-  lda #"f"
-  jsr print_char
-  lda #"t"
-  jsr print_char
-  lda #"e"
-  jsr print_char
-  lda #"r"
-  jsr print_char
-  lda #" "
-  jsr print_char
-  lda INPUT_PTR + 1
-  jsr print_hex_byte
-  lda INPUT_PTR
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda CHUNK_LENGTH + 1
-  jsr print_hex_byte
-  lda CHUNK_LENGTH
-  jsr print_hex_byte
-  jsr lcd_line_two
-  lda HASHER_INPUT_LEN + 1
-  jsr print_hex_byte
-  lda HASHER_INPUT_LEN
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-  lda CHUNK_INPUT_LEN + 1
-  jsr print_hex_byte
-  lda CHUNK_INPUT_LEN
-  jsr print_hex_byte
-  lda #4
-  jsr pause
-
   jmp hasher_update  ; back to the top
 
 
@@ -558,42 +444,12 @@ hasher_finalize:
   ; If this is the only chunk, root-finalize it and return.
   lda CHUNK_COUNTER
   bne hasher_finalize_stack_nonempty
-
-  jsr lcd_clear
-  lda #"f"
-  jsr print_char
-  lda #"r"
-  jsr print_char
-  lda #"c"
-  jsr print_char
-  lda #" "
-  jsr print_char
-  lda CHUNK_COUNTER
-  jsr print_hex_byte
-  lda #4
-  jsr pause
-
   lda #ROOT
   jsr chunk_state_finalize
   rts
 hasher_finalize_stack_nonempty:
   ; We need to do merges along the right edge of the tree. First
   ; finalize the current chunk as non-root.
-
-  jsr lcd_clear
-  lda #"f"
-  jsr print_char
-  lda #"n"
-  jsr print_char
-  lda #"c"
-  jsr print_char
-  lda #" "
-  jsr print_char
-  lda CHUNK_COUNTER
-  jsr print_hex_byte
-  lda #4
-  jsr pause
-
   lda #0  ; non-root
   jsr chunk_state_finalize
   ; Pop and merge all the entries in the CV stack. The final one is the
@@ -611,41 +467,11 @@ hasher_finalize_merge_loop:
   lda CV_STACK_PTR + 1
   cmp #>CV_STACK_START
   bne hasher_finalize_merge_loop_nonroot
-
-  jsr lcd_clear
-  lda #"f"
-  jsr print_char
-  lda #"r"
-  jsr print_char
-  lda #"p"
-  jsr print_char
-  lda #" "
-  jsr print_char
-  lda CHUNK_COUNTER
-  jsr print_hex_byte
-  lda #4
-  jsr pause
-
   ; Finalize as root and return.
   lda #ROOT
   jsr compress_parent_block
   rts
 hasher_finalize_merge_loop_nonroot:
-
-  jsr lcd_clear
-  lda #"f"
-  jsr print_char
-  lda #"n"
-  jsr print_char
-  lda #"p"
-  jsr print_char
-  lda #" "
-  jsr print_char
-  lda CHUNK_COUNTER
-  jsr print_hex_byte
-  lda #4
-  jsr pause
-
   ; Finalize as non-root and continue the loop.
   lda #0  ; non-root
   jsr compress_parent_block
