@@ -13,3 +13,8 @@ vectors](https://github.com/BLAKE3-team/BLAKE3/blob/master/test_vectors/test_vec
 and hashes each one. The output shown in the photo is for the [test input of
 length 0x1c01
 (7169)](https://github.com/BLAKE3-team/BLAKE3/blob/4e84c8c7ae3da71d3aff5ba54d8ffa39a9b90fa0/test_vectors/test_vectors.json#L181-L182).
+
+You can run the program under emulation in the terminal with `make emulate`.
+This requires [Rust and Cargo](https://rustup.rs/). The emulator is based on
+the [`emulator_6502`](https://github.com/GarettCooper/emulator_6502) Rust crate
+by Garett Cooper.

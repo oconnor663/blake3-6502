@@ -1,0 +1,7 @@
+[package]
+name = "emulate"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+emulator_6502 = "1.1.0"

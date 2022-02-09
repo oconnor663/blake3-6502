@@ -6,3 +6,7 @@ dump: a.out
 
 a.out: rom.s
 	vasm6502_oldstyle -Fbin -dotdir -esc rom.s
+
+.PHONY: emulate
+emulate: a.out
+	cd emulate && cargo run --release ../a.out
