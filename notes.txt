@@ -14,3 +14,9 @@ result of subtraction will wrap back around to positive when the difference is
 
 Allocating a new global but copy-pasting another global's address is a
 common mistake.
+
+This computer hashes 251*251=63001 bytes in 67 seconds. With a 1 MHz
+clock that's 1063 cycles per byte. For comparison, portable code on the
+ARM1167 runs at 28.5 cpb. The ARM1176 is a 32-bit processor, so if we
+add a factor of four we get 4*28.5=114 cpb. Can I speed up the 6502 code
+by an order of magnitude to match that? :)

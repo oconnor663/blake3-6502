@@ -40,6 +40,7 @@ IV6_BYTES: .byte $ab, $d9, $83, $1f
 IV7_BYTES: .byte $19, $cd, $e0, $5b
 
 INPUT_LENGTH_STRING: .asciiz "input len: "
+INPUT_251_STRING: .asciiz "251*251 = 0xf619"
 
 TEST_INPUT_LENGTHS_START:
   .word 0
@@ -250,8 +251,8 @@ hash_test_inputs_loop:
   lda TEST_INPUT_LEN_PTR + 1
   cmp #>TEST_INPUT_LENGTHS_END
   bne hash_test_inputs_loop_keep_going
-  ; If we get here, the whole program is done.
-  jmp end_loop
+  ; If we get here, we're done with this loop.
+  jmp hash_test_inputs_end
 hash_test_inputs_loop_keep_going:
   ; Set up the input pointer and length.
   lda #<TEST_INPUT_START
@@ -298,6 +299,43 @@ hash_test_inputs_loop_keep_going:
   sta TEST_INPUT_LEN_PTR + 1
   ; Continue the test inputs loop.
   jmp hash_test_inputs_loop
+hash_test_inputs_end:
+
+  ; One final test. Hash 251 test bytes 251 times.
+  jsr lcd_clear
+  lda #<INPUT_251_STRING
+  sta PRINT_STR_ARG
+  lda #>INPUT_251_STRING
+  sta PRINT_STR_ARG + 1
+  jsr print_str
+  jsr lcd_line_two
+  ; Initialize the hasher and use X as the loop variable.
+  jsr hasher_init
+  ldx #251
+loop_251:
+  lda #<TEST_INPUT_START
+  sta INPUT_PTR
+  lda #>TEST_INPUT_START
+  sta INPUT_PTR + 1
+  lda #251
+  sta HASHER_INPUT_LEN
+  lda #0
+  sta HASHER_INPUT_LEN + 1
+  ; Save X.
+  txa
+  pha
+  ; Add input.
+  jsr hasher_update
+  ; Restore X.
+  pla
+  tax
+  ; Decrement X and continue the loop if we're not done.
+  dex
+  bne loop_251
+
+  ; Print the final hash and continue into the end loop.
+  jsr hasher_finalize
+  jsr print_hash
 
 end_loop:
   jmp end_loop
