@@ -6,15 +6,16 @@ def main():
     # program under test fills 10 KiB of that with the test pattern.
     # Exclude test vectors larger than that.
     max_len = 10 * 1024
-    format_str = "{:04x}  {}"
+    format_str = "0x{:04x}   {}"
     for case in ORIGINAL_TEST_VECTORS["cases"]:
         input_len = case["input_len"]
         output = case["hash"]
         if input_len <= max_len:
             print(format_str.format(input_len, output[:16]))
-    # One last extra case, the length 251*251
-    final_expected = "362a6e693582d23d"
-    print(format_str.format(251 * 251, final_expected))
+    # An extra case, the length 251*251
+    print("251*251  362a6e693582d23d")
+    # Another extra case, a megabyte of zeros.
+    print("1 MB     c211bb2e5afbd0ef")
 
 
 # https://github.com/BLAKE3-team/BLAKE3/blob/master/test_vectors/test_vectors.json

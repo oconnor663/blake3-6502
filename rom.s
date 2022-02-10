@@ -19,6 +19,7 @@
 ; 2f..31      cv stack pointer
 ; 31..33      test input lengths pointer
 ; 33..80      [free]
+; 78..80      chunk counter (64 bits)
 ; 80..c0      state matrix
 ; c0..100     message block
 ; 100..200    [stack page]
@@ -94,12 +95,11 @@ G_MY = $07
 ; COMPRESS_MSG
 MPTRS = $08
 
-; chunk state metadata
-CHUNK_COUNTER      = $18
-CHUNK_COUNTER_OR_0 = $19  ; must be 0 for parent nodes
+; CHUNK_COUNTER      = $18  ; TODO: unused
+; CHUNK_COUNTER_OR_0 = $19  ; TODO: unused
 BLOCK_LENGTH       = $1a
-BLOCKS_COMPRESSED  = $1b  ; TODO: unused
-DOMAIN_BITFLAGS    = $1c
+; BLOCKS_COMPRESSED  = $1b  ; TODO: unused
+; DOMAIN_BITFLAGS    = $1c  ; TODO: unused
 
 ; inputs for hasher_update
 INPUT_PTR = $1d
@@ -128,6 +128,9 @@ CV_STACK_PTR = $2f
 
 ; two bytes, pointing to just after the last CV in the stack
 TEST_INPUT_LEN_PTR = $31
+
+; 8 bytes
+CHUNK_COUNTER = $78
 
 ; compression function constants
 ; The whole second half of the zero page is reserved for the
@@ -168,11 +171,9 @@ COMPRESS_MSG = $c0
 ;
 ; Allocating a full CV stack here is excessive, since we only have 64
 ; KiB of addressable memory, and the tree depth of a 64 KiB input is six
-; (much less than 54). In other places in this implementation, like the
-; 8-bit CHUNK_COUNTER, we do take advantage of this known maximum input
-; size to simplify things. However, allocating a full CV stack here is a
-; demonstration that BLAKE3's space overhead isn't too bad, even for the
-; 6502.
+; (much less than 54). However, we do have a test case that hashes 1 MB
+; of zeros, much larger than addressable memory. Also this demonstrates
+; that BLAKE3's space overhead isn't too bad, even for the 6502.
 CV_STACK_START = $200
 CV_STACK_CAPACITY_END = CV_STACK_START + (54 * 32)
 
@@ -410,16 +411,43 @@ end_loop:
 
 
 hasher_init:
-  ; Pre-initialize the chunk counter to $ff so that it rolls over to $00
-  ; in chunk_state_init_next.
-  lda #$ff
-  sta CHUNK_COUNTER
-  jsr chunk_state_init_next
+  ; Initialize the 8-byte chunk counter to zero.
+  lda #0
+  sta CHUNK_COUNTER + 0
+  sta CHUNK_COUNTER + 1
+  sta CHUNK_COUNTER + 2
+  sta CHUNK_COUNTER + 3
+  sta CHUNK_COUNTER + 4
+  sta CHUNK_COUNTER + 5
+  sta CHUNK_COUNTER + 6
+  sta CHUNK_COUNTER + 7
   ; Initialize the CV_STACK_PTR to CV_STACK_START.
   lda #<CV_STACK_START
   sta CV_STACK_PTR
   lda #>CV_STACK_START
   sta CV_STACK_PTR + 1
+  ; Initialize the chunk state.
+  jsr chunk_state_init
+  rts
+
+
+increment_chunk_counter:
+  inc CHUNK_COUNTER + 0
+  bne increment_chunk_counter_end
+  inc CHUNK_COUNTER + 1
+  bne increment_chunk_counter_end
+  inc CHUNK_COUNTER + 2
+  bne increment_chunk_counter_end
+  inc CHUNK_COUNTER + 3
+  bne increment_chunk_counter_end
+  inc CHUNK_COUNTER + 4
+  bne increment_chunk_counter_end
+  inc CHUNK_COUNTER + 5
+  bne increment_chunk_counter_end
+  inc CHUNK_COUNTER + 6
+  bne increment_chunk_counter_end
+  inc CHUNK_COUNTER + 7
+increment_chunk_counter_end:
   rts
 
 
@@ -482,6 +510,20 @@ copy_current_cv_to_message_block_loop:
   rts
 
 
+hasher_merge_parent_node:
+  ; First, copy the current CV into the right half of the message
+  ; buffer.
+  jsr copy_current_cv_to_message_block
+  ; Next, pop the top CV off the stack. It gets copied into the left
+  ; half of the message buffer.
+  jsr hasher_pop_stack
+  ; Do a parent block compression to merge them. A=0 here indicates this
+  ; is a non-root compression.
+  lda #0  ; non-root
+  jsr compress_parent_block
+  rts
+
+
 ; adds the chunk CV stored at H0..=H7 into the hash tree
 ;
 ; This chunk might complete some subtrees. For each completed subtree,
@@ -492,57 +534,56 @@ copy_current_cv_to_message_block_loop:
 ; buffer, and compress to merge them, overwriting the current CV in the
 ; process. After all these merges, push the final value of H0..=H7 onto
 ; the stack. The number of completed subtrees is given by the number of
-; trailing 1-bits in the previous number of chunks.
+; trailing 0-bits in the new total number of chunks.
 ;
 ; Section 5.1.2 of the BLAKE3 spec explains this algorithm in more
 ; detail.
 hasher_add_chunk_cv:
   ; In pseudocode this is:
   ;
-  ;   for each trailing 1 in chunk_counter:
-  ;     pop cv
-  ;     copy H0..=H7 to message block
-  ;     compress parent
-  ;   push cv
+  ;   for each trailing 0 bit in CHUNK_COUNTER:
+  ;     pop a CV to the left half of message block
+  ;     copy H0..=H7 to the right half message block
+  ;     compress a parent node, leaving its CV in H0..=H7
+  ;   push the CV in H0..=H7
 
-  ; Initialize A with the current (not yet incremented) value of
-  ; CHUNK_COUNTER. We'll bitshift this value one place to the right in
-  ; each iteration of this loop.
-  lda CHUNK_COUNTER
-hasher_add_chunk_cv_loop:
-  ; Save a copy of A to the stack. We'll restore it when we get to the
-  ; bitshift below.
-  pha
-
-  ; If the low bit of A is zero, we're done.
-  and #%00000001
-  beq hasher_add_chunk_cv_end
-
-  ; Otherwise, we need to do a merge. First, copy the current CV into
-  ; the right half of the message buffer.
-  jsr copy_current_cv_to_message_block
-
-  ; Next, pop the top CV off the stack. It gets copied into the left
-  ; half of the message buffer.
-  jsr hasher_pop_stack
-
-  ; Do a parent block compression to merge them. A=0 here indicates this
-  ; is a non-root compression.
-  lda #0
-  jsr compress_parent_block
-
-  ; Restore the previous value of A from the stack, shift it one bit to
-  ; the right, and loop back.
-  pla
+  ; X is an index into the bytes of CHUNK_COUNTER.
+  ldx #0
+hasher_add_chunk_cv_loop_over_chunk_counter_bytes:
+  ; Load the current counter byte into A.
+  lda CHUNK_COUNTER, x
+  ; Y counts the bits shifted in each byte. For each zero bit, we'll
+  ; merge a parent. If all 8 bits are zero, we'll continue the outer
+  ; loop to the next byte. If we encounter a one-bit, return.
+  ldy #8
+hasher_add_chunk_cv_loop_within_chunk_counter_byte:
+  ; Shift A one bit to the right, so that the lowest bit goes to the
+  ; carry flag.
   lsr
-  jmp hasher_add_chunk_cv_loop
-
-hasher_add_chunk_cv_end:
-  ; Clean up the copy of A that's still on the stack.
-  pla
-  ; Push the fully merged CV.
+  ; If the carry bit is clear, keep going. Otherwise push the current CV
+  ; and return.
+  bcc hasher_add_chunk_cv_keep_going
   jsr hasher_push_stack
   rts
+hasher_add_chunk_cv_keep_going:
+  ; Save A, X, and Y to the stack and do one parent node merge.
+  pha
+  txa
+  pha
+  tya
+  pha
+  jsr hasher_merge_parent_node
+  pla
+  tay
+  pla
+  tax
+  pla
+  ; Decrement Y. If it has not reached zero, continue the inner loop.
+  dey
+  bne hasher_add_chunk_cv_loop_within_chunk_counter_byte
+  ; Otherwise increment X and continue the outer loop.
+  inx
+  jmp hasher_add_chunk_cv_loop_over_chunk_counter_bytes
 
 
 ; reads INPUT_PTR and HASHER_INPUT_LEN
@@ -575,8 +616,9 @@ hasher_update_nonempty_input:
   ; is non-root.
   lda #0  ; non-root
   jsr chunk_state_finalize
+  jsr increment_chunk_counter
   jsr hasher_add_chunk_cv
-  jsr chunk_state_init_next
+  jsr chunk_state_init
 
 hasher_update_chunk_not_full:
   ; Either we just finalized the last chunk and initialized a
@@ -623,9 +665,19 @@ hasher_update_chunk_input_length_ready:
 ; This ends up computing all the parent nodes on the right edge of the
 ; hash tree.
 hasher_finalize:
-  ; If this is the only chunk, root-finalize it and return.
-  lda CHUNK_COUNTER
+  ; If this is the only chunk, root-finalize it and return. We need to
+  ; check all the bytes of CHUNK_COUNTER.
+  lda CHUNK_COUNTER + 0
+  ora CHUNK_COUNTER + 1
+  ora CHUNK_COUNTER + 2
+  ora CHUNK_COUNTER + 3
+  ora CHUNK_COUNTER + 4
+  ora CHUNK_COUNTER + 5
+  ora CHUNK_COUNTER + 6
+  ora CHUNK_COUNTER + 7
   bne hasher_finalize_stack_nonempty
+  ; CHUNK_COUNTER is zero and this is the only chunk. Root finalize it
+  ; and return.
   lda #ROOT
   jsr chunk_state_finalize
   rts
@@ -661,19 +713,12 @@ hasher_finalize_merge_loop_nonroot:
 
 
 ; Chunk state initialization will:
-;   - increment the CHUNK_COUNTER
 ;   - zero the BLOCK_LENGTH
 ;   - zero the CHUNK_LENGTH
 ;   - copy the 32 IV bytes to H
-;   - initialize DOMAIN_BITFLAGS to CHUNK_START
-; The chunk counter is only 8 bits in this implementation,
-; because our addressable memory can only fit 32 chunks, but
-; in theory we could increase it if we wanted to hash some
-; larger input in pieces. For the first chunk, we'll
-; initialize the chunk counter to $ff before calling this, and
-; it'll roll over.
-chunk_state_init_next:
-  inc CHUNK_COUNTER
+; Note that zeroing and incrementing the CHUNK_COUNTER is done in
+; hasher_init and hasher_update, not here.
+chunk_state_init:
   lda #0
   sta BLOCK_LENGTH
   sta CHUNK_LENGTH
@@ -681,10 +726,6 @@ chunk_state_init_next:
 
   ; set H to IV
   jsr set_h_to_iv
-
-  ; initialize DOMAIN_BITFLAGS
-  lda #CHUNK_START
-  sta DOMAIN_BITFLAGS
 
   rts
 
@@ -711,15 +752,15 @@ chunk_state_update_nonempty_input:
   cmp #64
   bne chunk_state_update_copy
 
-  ; the block buffer is full, compress it
-  lda CHUNK_COUNTER
-  sta CHUNK_COUNTER_OR_0
-  jsr compress
+  ; The block buffer is full, so compress it. This is not CHUNK_END or
+  ; ROOT, so set A to 0. Note that compress_chunk_block will take care
+  ; of CHUNK_START.
+  lda #0  ; non-root, non-end
+  jsr compress_chunk_block
 
-  ; clear BLOCK_LENGTH and DOMAIN_BITFLAGS (to remove CHUNK_START)
+  ; reset BLOCK_LENGTH to 0
   lda #0
   sta BLOCK_LENGTH
-  sta DOMAIN_BITFLAGS
 
 chunk_state_update_copy:
   ; we need to copy the minimum of (64-BLOCK_LENGTH), which is
@@ -820,14 +861,8 @@ chunk_state_update_copy_loop_end:
 ; (non-root) or ROOT. This function writes zero padding to the
 ; block buffer, sets the CHUNK_END flag, and calls compress.
 chunk_state_finalize:
-  ; The caller has set the A register to either 0 or ROOT.
-  ; DOMAIN_BITFLAGS contains either 0 or CHUNK_START.
-  ; Bitwise-or both of those values together, bitwise-or the
-  ; CHUNK_END flag in addition, and then write the reuslt to
-  ; DOMAIN_BITFLAGS.
-  ora DOMAIN_BITFLAGS
-  ora #CHUNK_END
-  sta DOMAIN_BITFLAGS
+  ; The caller has set A to either 0 or ROOT. Save it to Y.
+  tay
 
   ; write zero padding to the block buffer
   ldx BLOCK_LENGTH
@@ -840,46 +875,98 @@ chunk_state_finalize_padding_loop:
   jmp chunk_state_finalize_padding_loop
 chunk_state_finalize_padding_loop_end:
 
-  ; Compress the final block.
-  lda CHUNK_COUNTER
-  sta CHUNK_COUNTER_OR_0
-  jsr compress
+  ; Retrieve 0 or ROOT from Y, set CHUNK_END in addition, and compress.
+  ; Note that compress_chunk_block will take care of CHUNK_START.
+  tya
+  ora #CHUNK_END
+  jsr compress_chunk_block
 
   rts
 
 
-; Sets CHUNK_COUNTER_OR_0 to CHUNK_COUNTER before compressing.
-; Note that chunk_state_init_next takes care of CHUNK_COUNTER
-; and the CHUNK_START bit in DOMAIN_BITFLAGS.
+; The caller should set A to 0, CHUNK_END, or CHUNK_END|ROOT. This
+; function:
+;   - adds the CHUNK_START flag to A if CHUNK_LENGTH <= 64
+;   - copies CHUNK_COUNTER into T0 and T1
+;   - calls compress
 compress_chunk_block:
-  lda CHUNK_COUNTER
-  sta CHUNK_COUNTER_OR_0
+  ; Copy the domain flags from A to X.
+  tax
+  ; Subtract 64 - CHUNK_LENGTH. If 64 < CHUNK_LENGTH, this will clear
+  ; the carry flag. Thus we should set CHUNK_START if the carry flag
+  ; remains set.
+  lda #64
+  sec
+  sbc CHUNK_LENGTH
+  lda #0
+  sbc CHUNK_LENGTH + 1  ; includes the carry/borrow flag
+  ; Now the carry flag is set if we should set CHUNK_START. The
+  ; CHUNK_START flag happens to have the value 1, so just add the carry
+  ; bit to the flags previously stashed in X.
+  txa
+  adc #0
+
+  ; Copy CHUNK_COUNTER into T0 and T1. Preserve A while we do this.
+  ldx CHUNK_COUNTER + 0
+  stx COMPRESS_T0 + 0
+  ldx CHUNK_COUNTER + 1
+  stx COMPRESS_T0 + 1
+  ldx CHUNK_COUNTER + 2
+  stx COMPRESS_T0 + 2
+  ldx CHUNK_COUNTER + 3
+  stx COMPRESS_T0 + 3
+  ldx CHUNK_COUNTER + 4
+  stx COMPRESS_T1 + 0
+  ldx CHUNK_COUNTER + 5
+  stx COMPRESS_T1 + 1
+  ldx CHUNK_COUNTER + 6
+  stx COMPRESS_T1 + 2
+  ldx CHUNK_COUNTER + 7
+  stx COMPRESS_T1 + 3
+
+  ; Note that we don't mess with H or the IV bytes here. H is either set
+  ; up in chunk_state_init, or left over from the last compression.
+  ; Similarly, BLOCK_LENGTH is set in chunk_state_update.
+
+  ; A still contains the full set of flags.
   jsr compress
+  rts
+
 
 ; In addition to putting child CVs in the message block, the
 ; caller must first set the A register to either 0 (non-root)
 ; or ROOT. This function:
-;   - sets (A | PARENT) to DOMAIN_BITFLAGS
-;   - sets CHUNK_COUNTER_OR_0 to 0
+;   - adds the PARENT flag to A
+;   - writes zero bytes to T0 and T1
 ;   - sets BLOCK_LENGTH to 64
 ;   - sets H to IV
+;   - calls compress
 compress_parent_block:
-  ; The caller has set A to either 0 (non-root) or ROOT. Add
-  ; the PARENT flag and write to DOMAIN_BITFLAGS.
+  ; The caller has set A to either 0 (non-root) or ROOT. Set the PARENT
+  ; flag also and then push A.
   ora #PARENT;
-  sta DOMAIN_BITFLAGS
+  pha
 
-  ; set CHUNK_COUNTER_OR_0 to 0
-  lda #0
-  sta CHUNK_COUNTER_OR_0
-
-  ; set BLOCK_LENGTH to 64
+  ; Set BLOCK_LENGTH to 64.
   lda #64
   sta BLOCK_LENGTH
 
-  ; load IV bytes into H
+  ; Load IV bytes into H.
   jsr set_h_to_iv
 
+  ; Load zeros into T0 and T1.
+  lda #0
+  sta COMPRESS_T0 + 0
+  sta COMPRESS_T0 + 1
+  sta COMPRESS_T0 + 2
+  sta COMPRESS_T0 + 3
+  sta COMPRESS_T1 + 0
+  sta COMPRESS_T1 + 1
+  sta COMPRESS_T1 + 2
+  sta COMPRESS_T1 + 3
+
+  ; Pull the domain flags back into A and compress.
+  pla
   jsr compress
   rts
 
@@ -896,17 +983,65 @@ set_h_to_iv_loop:
 
 
 ; Compression will first:
+;   - set D based on domain bitflags in A
+;   - load B from BLOCK_LENGTH
 ;   - initialize the MPTRS array
 ;   - set the IV constants in the third row of the state
-;   - set T0, T1, B, and D in the fourth row of the state
-; The caller needs to arrange:
-;   - the 32-byte CV in H0..=H7
-;   - the 64-byte block buffer at COMPRESS_MSG, including its
-;     zero padding
+; The caller needs to set or keep track of:
+;   - domain bitflags in the A register
 ;   - the value of BLOCK_LENGTH
-;   - the value of CHUNK_COUNTER_OR_0
-;   - the bitflags in DOMAIN_BITFLAGS
+;   - the 8 bytes in T0 and T1
+;   - the 32-byte CV in H0..=H7
+;   - the 64-byte block buffer at COMPRESS_MSG, including zero padding
 compress:
+  ; Use the domain bitflags in A to set the low byte of D
+  sta COMPRESS_D
+  ; Load BLOCK_LENGTH into the low byte of B.
+  lda BLOCK_LENGTH
+  sta COMPRESS_B
+  ; Zero out the other bytes of D and B.
+  lda #0
+  sta COMPRESS_D + 1
+  sta COMPRESS_D + 2
+  sta COMPRESS_D + 3
+  sta COMPRESS_B + 1
+  sta COMPRESS_B + 2
+  sta COMPRESS_B + 3
+
+  ; If the PARENT flag is set in D, load zeros into T0 and T1. Otherwise
+  ; load CHUNK_COUNTER.
+  lda COMPRESS_D
+  and #PARENT
+  beq compress_load_chunk_counter
+  lda #0
+  sta COMPRESS_T0 + 0
+  sta COMPRESS_T0 + 1
+  sta COMPRESS_T0 + 2
+  sta COMPRESS_T0 + 3
+  sta COMPRESS_T1 + 0
+  sta COMPRESS_T1 + 1
+  sta COMPRESS_T1 + 2
+  sta COMPRESS_T1 + 3
+  jmp compress_t_loaded
+compress_load_chunk_counter:
+  lda CHUNK_COUNTER + 0
+  sta COMPRESS_T0 + 0
+  lda CHUNK_COUNTER + 1
+  sta COMPRESS_T0 + 1
+  lda CHUNK_COUNTER + 2
+  sta COMPRESS_T0 + 2
+  lda CHUNK_COUNTER + 3
+  sta COMPRESS_T0 + 3
+  lda CHUNK_COUNTER + 4
+  sta COMPRESS_T1 + 0
+  lda CHUNK_COUNTER + 5
+  sta COMPRESS_T1 + 1
+  lda CHUNK_COUNTER + 6
+  sta COMPRESS_T1 + 2
+  lda CHUNK_COUNTER + 7
+  sta COMPRESS_T1 + 3
+compress_t_loaded:
+
   ; reinitialize MPTRS with COMPRESS_MSG, +4, +8, ...
   lda #COMPRESS_MSG
   ldx #0
@@ -929,29 +1064,7 @@ compress_iv_consts_loop:
   cpx #16
   bne compress_iv_consts_loop
 
-  ; set T0, T1, B, and D
-  lda #0
-  sta COMPRESS_T0 + 1
-  sta COMPRESS_T0 + 2
-  sta COMPRESS_T0 + 3
-  sta COMPRESS_T1 + 0
-  sta COMPRESS_T1 + 1
-  sta COMPRESS_T1 + 2
-  sta COMPRESS_T1 + 3
-  sta COMPRESS_B + 1
-  sta COMPRESS_B + 2
-  sta COMPRESS_B + 3
-  sta COMPRESS_D + 1
-  sta COMPRESS_D + 2
-  sta COMPRESS_D + 3
-  lda CHUNK_COUNTER_OR_0
-  sta COMPRESS_T0
-  lda BLOCK_LENGTH
-  sta COMPRESS_B
-  lda DOMAIN_BITFLAGS
-  sta COMPRESS_D
-
-  ; compression rounds
+  ; Setup is finished. Now do the compression rounds.
   jsr round    ; round 1
   jsr permute
   jsr round    ; round 2
