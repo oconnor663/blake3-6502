@@ -206,39 +206,45 @@ main:
 
   jsr lcd_clear
 
-  ; populate the test vector input with 10 KiB of
-  ; 0,1,2,...,250,0,1... bytes
-  ; Reuse INPUT_PTR for the walking pointer.
+  ; Populate the test input with 10 KiB of a repeating 251-byte cycle:
+  ; 0, 1, 2, ..., 250, 0, 1, and so on. This is the input pattern used
+  ; by the BLAKE3 test vectors. Reuse INPUT_PTR for writing here. X will
+  ; track the 251-byte cycle, and the Y will track page offsets.
   lda #<TEST_INPUT_START
   sta INPUT_PTR
   lda #>TEST_INPUT_START
   sta INPUT_PTR + 1
   ldx #0
-populate_input_loop:
-  txa
+populate_test_input_loop:
   ldy #0
+populate_test_input_page_loop:
+  ; Write X to the Yth byte of the current page.
+  txa
   sta (INPUT_PTR), y
-  ; increment the pointer in INPUT_PTR
-  lda INPUT_PTR
-  clc
-  adc #1
-  sta INPUT_PTR
-  lda INPUT_PTR + 1
-  adc #0  ; add the carry bit
-  sta INPUT_PTR + 1
-  ; We want to write 40 pages. 42 accounts for the zero page
-  ; and the stack page.
-  cmp #(40 + 2)
-  beq populate_input_done
+  ; X = (X + 1) % 251
   inx
   cpx #251
-  bne after_reset_paint
+  bne populate_test_input_x_lt_251
   ldx #0
-after_reset_paint:
-  jmp populate_input_loop
-populate_input_done:
+populate_test_input_x_lt_251:
+  ; Y += 1
+  iny
+  ; If Y hasn't wrapped to 0, continue writing this page.
+  bne populate_test_input_page_loop
+  ; Y has wrapped to 0. Bump INPUT_PTR by one page.
+  inc INPUT_PTR + 1
+  ; If INPUT_PTR - TEST_INPUT_START is 40 * 256 = 10240 = $2800, this
+  ; loop is done. We only increment the high byte, which is still in A,
+  ; so that's all we need to check.
+  lda INPUT_PTR + 1
+  sec
+  sbc #>TEST_INPUT_START
+  cmp #$28
+  bne populate_test_input_loop
+  ; Populate test input loop done.
 
-  ; Loop over each of the test input lengths.
+  ; Hash each of the test inputs. These are the official BLAKE3 test
+  ; vectors (leaving out the ones that don't fit in RAM here).
   lda #<TEST_INPUT_LENGTHS_START
   sta TEST_INPUT_LEN_PTR
   lda #>TEST_INPUT_LENGTHS_START
