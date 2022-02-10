@@ -2,16 +2,16 @@
 ; 00..02      scratch space or pointer arguments
 ; 02..08      G function arguments
 ; 08..18      permuted pointers into the message block
-; 18          chunk counter
-; 19          chunk counter for chunks, 0 for parent nodes
+; 18          chunk counter (TODO: unused)
+; 19          chunk counter for chunks, 0 for parent nodes (TODO: unused)
 ; 1a          block length
 ; 1b          block compressed in current chunk (TODO: unused)
-; 1c          bitflags for the next compression
+; 1c          bitflags for the next compression (TODO: unused)
 ; 1d..1f      input ptr
 ; 1f..21      hasher input len
 ; 21..23      chunk input len
 ; 23..26      pause scratch
-; 26          break flag
+; 26          break flag (TODO: unused)
 ; 27          block bytes to copy
 ; 29..2b      print string arg
 ; 2b..2d      ror12 scratch
@@ -109,8 +109,7 @@ CHUNK_INPUT_LEN = $21
 ; 3 bytes of scratch space for the pause function
 PAUSE_SCRATCH = $23
 
-; set by BRK/IRQ and cleared by NMI
-BREAK_FLAG = $26
+;BREAK_FLAG = $26  ; TODO: unused
 
 BLOCK_BYTES_TO_COPY = $27
 
@@ -1694,92 +1693,6 @@ print_hash:
   rts
 
 
-; X contains the starting address of the row (H0, H4, H8, H12)
-print_state_row:
-  jsr lcd_clear
-  jsr print_hex_u32
-  inx
-  inx
-  inx
-  inx
-  jsr print_hex_u32
-  inx
-  inx
-  inx
-  inx
-  jsr lcd_line_two
-  jsr print_hex_u32
-  inx
-  inx
-  inx
-  inx
-  jsr print_hex_u32
-  inx
-  inx
-  inx
-  inx
-  rts
-
-
-print_full_state:
-  ldx #H0
-print_full_state_loop:
-  jsr print_state_row
-  lda #4
-  jsr pause
-  jsr lcd_clear
-  lda #1
-  jsr pause
-  cpx #(H0 + 64)
-  bne print_full_state_loop
-
-  rts
-
-
-print_debug_info:
-  pha
-  txa
-  pha
-  tya
-  pha
-
-  jsr lcd_clear
-
-  lda #"d"
-  jsr print_char
-  lda #" "
-  jsr print_char
-
-  lda INPUT_PTR+1
-  jsr print_hex_byte
-  lda INPUT_PTR
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-
-  lda HASHER_INPUT_LEN+1
-  jsr print_hex_byte
-  lda HASHER_INPUT_LEN
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-
-  lda BLOCK_LENGTH
-  jsr print_hex_byte
-  lda #" "
-  jsr print_char
-
-  lda #4
-  jsr pause
-
-  pla
-  tay
-  pla
-  tax
-  pla
-  rts
-
-
 ; A controls the pause duration, preserves A, X, and Y
 pause:
   ; write A, X, and Y to PAUSE_SCRATCH
@@ -1809,26 +1722,10 @@ pause_loop:
   rts
 
 
-break:
-  pha
-  lda #1
-  sta BREAK_FLAG
-break_loop:
-  lda BREAK_FLAG
-  bne break_loop
-  ; we get here when NMI clears the BREAK_FLAG
-  pla
-  rts
-
-
 irq:
   rti
 
 nmi:
-  pha
-  lda #0
-  sta BREAK_FLAG
-  pla
   rti
 
   .org $fffa
