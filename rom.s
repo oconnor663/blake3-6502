@@ -40,7 +40,8 @@ IV6_BYTES: .byte $ab, $d9, $83, $1f
 IV7_BYTES: .byte $19, $cd, $e0, $5b
 
 INPUT_LENGTH_STRING: .asciiz "input len: "
-INPUT_251_STRING: .asciiz "251*251 = 0xf619"
+INPUT_251_STRING: .asciiz "251*251 = 63001:"
+INPUT_1MB_STRING: .asciiz "1 MB all zeros: "
 
 TEST_INPUT_LENGTHS_START:
   .word 0
@@ -307,7 +308,9 @@ hash_test_inputs_loop_keep_going:
   jmp hash_test_inputs_loop
 hash_test_inputs_end:
 
-  ; One final test. Hash 251 test bytes 251 times.
+  ; We've finished the main test vectors loop. Now there are two more
+  ; custom inputs to hash. First, hash the 251-byte test cycle 251
+  ; times. These bytes are already populated.
   jsr lcd_clear
   lda #<INPUT_251_STRING
   sta PRINT_STR_ARG
@@ -338,8 +341,67 @@ loop_251:
   ; Decrement X and continue the loop if we're not done.
   dex
   bne loop_251
+  jsr hasher_finalize
+  jsr print_hash
+  lda #8
+  jsr pause
 
-  ; Print the final hash and continue into the end loop.
+
+  ; The second custom input is a megabyte of all zeros. Overwrite the
+  ; test input with all zeros, then hash a 10 KB (not KiB) chunk of it
+  ; 100 times.
+  lda #<TEST_INPUT_START
+  sta INPUT_PTR
+  lda #>TEST_INPUT_START
+  sta INPUT_PTR + 1
+zero_test_input_loop:
+  ldy #0
+  lda #0
+zero_test_input_page_loop:
+  ; Write 0 to the Yth byte of the current page.
+  sta (INPUT_PTR), y
+  ; Y += 1
+  iny
+  ; If Y hasn't wrapped to 0, continue writing this page.
+  bne zero_test_input_page_loop
+  ; Y has wrapped to 0. Bump INPUT_PTR by one page.
+  inc INPUT_PTR + 1
+  ; If INPUT_PTR - TEST_INPUT_START is 40 * 256 = 10240 = $2800, this
+  ; loop is done. We only increment the high byte, which is still in A,
+  ; so that's all we need to check.
+  lda INPUT_PTR + 1
+  sec
+  sbc #>TEST_INPUT_START
+  cmp #$28
+  bne zero_test_input_loop
+  ; Zero test input loop done.
+
+  ; Now hash 10 KB one hundred times.
+  jsr lcd_clear
+  lda #<INPUT_1MB_STRING
+  sta PRINT_STR_ARG
+  lda #>INPUT_1MB_STRING
+  sta PRINT_STR_ARG + 1
+  jsr print_str
+  jsr lcd_line_two
+  jsr hasher_init
+  ldx #100
+hash_megabyte_loop:
+  lda #<TEST_INPUT_START
+  sta INPUT_PTR
+  lda #>TEST_INPUT_START
+  sta INPUT_PTR + 1
+  lda #<10000
+  sta HASHER_INPUT_LEN
+  lda #>10000
+  sta HASHER_INPUT_LEN + 1
+  txa
+  pha
+  jsr hasher_update
+  pla
+  tax
+  dex
+  bne hash_megabyte_loop
   jsr hasher_finalize
   jsr print_hash
 
