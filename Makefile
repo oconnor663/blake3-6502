@@ -1,12 +1,12 @@
-flash: a.out
-	minipro --device AT28C256 --write a.out
+flash: rom.bin
+	minipro --device AT28C256 --write rom.bin
 
-dump: a.out
-	hexdump -C a.out
+dump: rom.bin
+	hexdump -C rom.bin
 
-a.out: rom.s
-	vasm6502_oldstyle -Fbin -dotdir -esc rom.s
+rom.bin: rom.s
+	vasm6502_oldstyle -Fbin -dotdir -esc rom.s -o rom.bin
 
 .PHONY: emulate
-emulate: a.out
-	cd emulate && cargo run --release ../a.out
+emulate: rom.bin
+	cd emulate && cargo run --release ../rom.bin
