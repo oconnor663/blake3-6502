@@ -120,7 +120,9 @@ CV_STACK_CAPACITY_END = CV_STACK_START + (54 * 32)
 TEST_INPUT_START = $1000
 TEST_INPUT_END   = TEST_INPUT_START + (10 * 1024)
 
-  ; Our ROM is mapped at address $8000.
+; -------------------------- ROM ---------------------------
+
+  ; This ROM is mapped at address $8000.
   .org $8000
 
 IV0_BYTES: .byte $67, $e6, $09, $6a
