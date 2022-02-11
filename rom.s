@@ -727,38 +727,25 @@ chunk_state_update_nonempty_input:
   sta BLOCK_LENGTH
 
 chunk_state_update_copy:
-  ; we need to copy the minimum of (64-BLOCK_LENGTH), which is
-  ; 8-bits, and CHUNK_INPUT_LEN, which is 16-bits.
-
-  ; The remaining buffer space is 64 - BLOCK_LENGTH. Write
-  ; this value to BLOCK_BYTES_TO_COPY.
+  ; Initialize BLOCK_BYTES_TO_COPY to 64-BLOCK_LENGTH. This is the
+  ; number of bytes needed to fill the current block.
   lda #64
   sec
   sbc BLOCK_LENGTH
   sta BLOCK_BYTES_TO_COPY
 
-  ; If the high byte of CHUNK_INPUT_LEN is non-zero, keep the
-  ; remaining buffer space in BLOCK_BYTES_TO_COPY and jump
-  ; to the loop start.
+  ; If the CHUNK_INPUT_LEN is shorter than BLOCK_BYTES_TO_COPY, we need
+  ; to cap BLOCK_BYTES_TO_COPY.
+  lda CHUNK_INPUT_LEN
+  sec
+  sbc BLOCK_BYTES_TO_COPY
   lda CHUNK_INPUT_LEN + 1
-  bne chunk_state_update_copy_loop_start
-
-  ; Do the same if the remaining buffer space is less than the
-  ; low byte of CHUNK_INPUT_LEN.
-  ; NOTE: A big mistake I made here was trying to use BMI to
-  ; branch if the result of the subtraction is negative. That
-  ; appears to work until CHUNK_INPUT_LEN is large enough that
-  ; the result wraps back around to <=127. (So in this case it
-  ; goes wrong here when CHUNK_INPUT_LEN is 193.) BCC is the
-  ; reliable way to implement a less-than check.
-  lda BLOCK_BYTES_TO_COPY
-  cmp CHUNK_INPUT_LEN
-  bcc chunk_state_update_copy_loop_start
-
-  ; Otherwise, this is the "input is shorter than remaining
-  ; buffer space" case. Overwrite BLOCK_BYTES_TO_COPY with
-  ; the low byte of CHUNK_INPUT_LEN (the high byte must be
-  ; zero here).
+  sbc #0  ; includes the carry/borrow bit
+  ; If the carry flag is set, CHUNK_INPUT_LEN is not shorter, and we can
+  ; keep the current value of BLOCK_BYTES_TO_COPY. Otherwise we need to
+  ; set it to the low byte of CHUNK_INPUT_LEN. (The high byte will be
+  ; zero in that case.)
+  bcs chunk_state_update_copy_loop_start
   lda CHUNK_INPUT_LEN
   sta BLOCK_BYTES_TO_COPY
 
