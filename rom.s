@@ -1,32 +1,124 @@
+; This is an incremental implementation of the BLAKE3 cryptographic hash
+; function in 6502 assembly, targeting Ben Eater's breadboard computer
+; (https://eater.net/6502). Apart from incrementality it's a minimal
+; implementation: keying, key derivation, and extended outputs aren't
+; supported.
+;
 ; ======================= Memory Map =======================
-; 00..02      scratch space or pointer arguments
-; 02..08      G function arguments
-; 08..18      permuted pointers into the message block
-; 18          chunk counter (TODO: unused)
-; 19          chunk counter for chunks, 0 for parent nodes (TODO: unused)
-; 1a          block length
-; 1b          block compressed in current chunk (TODO: unused)
-; 1c          bitflags for the next compression (TODO: unused)
-; 1d..1f      input ptr
-; 1f..21      hasher input len
-; 21..23      chunk input len
-; 23..26      pause scratch
-; 26          break flag (TODO: unused)
-; 27          block bytes to copy
-; 29..2b      print string arg
-; 2b..2d      ror12 scratch
-; 2d..2f      chunk length
-; 2f..31      cv stack pointer
-; 31..33      test input lengths pointer
-; 33..80      [free]
-; 78..80      chunk counter (64 bits)
-; 80..c0      state matrix
-; c0..100     message block
-; 100..200    [stack page]
-; 200..8c0    cv stack (32 * 54 = 1728 bytes)
-; 8c0...30c0  test vector input with repeating pattern (10 KiB)
-; 30c0..4000  [free]
-; ==========================================================
+;
+; ----------------------- zero page ------------------------
+;
+; The two hottest data structures:
+;
+; 00-3f       compression state, 64 bytes (16 4-byte words)
+; 40-7f       message block, 64 bytes (16 4-byte words)
+;
+; State that persists across calls to hasher_update (except the CV
+; stack, which doesn't fit in the zero page):
+;
+; 80-87       chunk counter, 8 bytes
+; 88-89       CV stack pointer
+; 8a-8b       chunk length
+; 8c          block length
+;
+; Function arguments and scratch state:
+;
+; 8d-9c       pointers into the message block permuted by compress, 16 bytes
+; 9d-a2       argument pointers for the G function, 6 bytes
+; a3-a4       input pointer for hasher_update and chunk_state_update
+; a5-a6       hasher_update input length
+; a7-a8       chunk_state_update input length
+; a9          scratch byte for block copy length
+; aa-ab       scratch bytes for ror12_u32, 2 bytes
+; ac-ae       scratch bytes for pause, 3 bytes
+; af-b0       argument pointer for print_str
+; b1-b2       a pointer for traversing the test inputs list
+; b3-ff       [77 bytes free]
+;
+; ------------------------- stack --------------------------
+;
+; 100-1ff     [stack]
+;
+; ---------------------- main memory -----------------------
+;
+; 200-8bf     CV stack, 1728 bytes
+; 8c0-fff     [1856 bytes free]
+; 1000-37ff   input buffer, 10 KiB
+; 3800-3fff   [2048 bytes free]
+;
+; ----------------------------------------------------------
+
+; compression state, 64 bytes (16 4-byte words)
+H0  = $00
+H1  = $04
+H2  = $08
+H3  = $0c
+H4  = $10
+H5  = $14
+H6  = $18
+H7  = $1c
+H8  = $20
+H9  = $24
+H10 = $28
+H11 = $2c
+H12 = $30
+H13 = $34
+H14 = $38
+H15 = $3c
+COMPRESS_T0  = H12
+COMPRESS_T1  = H13
+COMPRESS_B   = H14
+COMPRESS_D   = H15
+
+; message block, 64 bytes (16 4-byte words)
+COMPRESS_MSG = $40
+
+; persistent state
+CHUNK_COUNTER = $80 ; 8 bytes
+CV_STACK_PTR  = $88 ; 2 bytes
+CHUNK_LENGTH  = $8a ; 2 bytes
+BLOCK_LENGTH  = $8c ; 1 byte
+
+; pointers into the message block permuted by compress
+MPTRS = $8d ; 16 bytes
+
+; argument pointers for the G function
+G_A  = $9d
+G_B  = $9e
+G_C  = $9f
+G_D  = $a0
+G_MX = $a1
+G_MY = $a2
+
+; other function arguments and scratch state
+INPUT_PTR           = $a3 ; 2 bytes
+HASHER_INPUT_LEN    = $a5 ; 2 bytes
+CHUNK_INPUT_LEN     = $a7 ; 2 bytes
+BLOCK_BYTES_TO_COPY = $a9 ; 1 byte
+ROR12_SCRATCH       = $aa ; 2 bytes
+PAUSE_SCRATCH       = $ac ; 3 bytes
+PRINT_STR_ARG       = $af ; 2 bytes
+TEST_INPUT_LEN_PTR  = $b1 ; 2 bytes
+
+; ---------------------- main memory -----------------------
+
+; The chaining value stack ("CV stack") has space for 54 CVs, 32 bytes
+; each: 54 * 32 = 1728 = $06c0
+; $0200 + $06c0 = $08c0
+;
+; Allocating a full CV stack here is excessive, since we only have 64
+; KiB of addressable memory, and the tree depth of a 64 KiB input is six
+; (much less than 54). However, we do have a test case that hashes 1 MB
+; of zeros, much larger than addressable memory. Also this demonstrates
+; that BLAKE3's space overhead isn't too bad, even for the 6502.
+CV_STACK_START = $200
+CV_STACK_CAPACITY_END = CV_STACK_START + (54 * 32)
+
+; This is the input buffer for all tests. The main function fills this
+; buffer with a 251-byte repeating pattern, and then overwrites it with
+; zeros for the final test.
+TEST_INPUT_START = $1000
+TEST_INPUT_END   = TEST_INPUT_START + (10 * 1024)
 
   ; Our ROM is mapped at address $8000.
   .org $8000
@@ -45,146 +137,19 @@ INPUT_251_STRING: .asciiz "251*251 = 63001:"
 INPUT_1MB_STRING: .asciiz "1 MB all zeros: "
 
 TEST_INPUT_LENGTHS_START:
-  .word 0
-  .word 1
-  .word 2
-  .word 3
-  .word 4
-  .word 5
-  .word 6
-  .word 7
-  .word 8
-  .word 63
-  .word 64
-  .word 65
-  .word 127
-  .word 128
-  .word 129
-  .word 1023
-  .word 1024
-  .word 1025
-  .word 2048
-  .word 2049
-  .word 3072
-  .word 3073
-  .word 4096
-  .word 4097
-  .word 5120
-  .word 5121
-  .word 6144
-  .word 6145
-  .word 7168
-  .word 7169
-  .word 8192
-  .word 8193
+  .word 0, 1, 2, 3, 4, 5, 6, 7, 8, 63, 64, 65, 127, 128, 129, 1023
+  .word 1024, 1025, 2048, 2049, 3072, 3073, 4096, 4097, 5120, 5121
+  .word 6144, 6145, 7168, 7169, 8192, 8193
 TEST_INPUT_LENGTHS_END:
   .word 0
 
-; two bytes of scratch space, or sometimes a pointer arg
-SCRATCH = $00
-
-; G function constants
-; These are scratch space slots for zp pointers.
-G_A  = $02
-G_B  = $03
-G_C  = $04
-G_D  = $05
-G_MX = $06
-G_MY = $07
-; An array of 16 bytes, $08..18, each of which points into
-; COMPRESS_MSG
-MPTRS = $08
-
-; CHUNK_COUNTER      = $18  ; TODO: unused
-; CHUNK_COUNTER_OR_0 = $19  ; TODO: unused
-BLOCK_LENGTH       = $1a
-; BLOCKS_COMPRESSED  = $1b  ; TODO: unused
-; DOMAIN_BITFLAGS    = $1c  ; TODO: unused
-
-; inputs for hasher_update
-INPUT_PTR = $1d
-HASHER_INPUT_LEN = $1f
-CHUNK_INPUT_LEN = $21
-
-; 3 bytes of scratch space for the pause function
-PAUSE_SCRATCH = $23
-
-;BREAK_FLAG = $26  ; TODO: unused
-
-BLOCK_BYTES_TO_COPY = $27
-
-; two-byte pointer
-PRINT_STR_ARG = $29
-
-; two bytes
-ROR12_SCRATCH = $2b
-
-; two bytes
-CHUNK_LENGTH = $2d
-
-; two bytes, pointing to just after the last CV in the stack
-CV_STACK_PTR = $2f
-
-; two bytes, pointing to just after the last CV in the stack
-TEST_INPUT_LEN_PTR = $31
-
-; 8 bytes
-CHUNK_COUNTER = $78
-
-; compression function constants
-; The whole second half of the zero page is reserved for the
-; compression function state and message block.
-; $80..c0 (64 bytes) is the internal state.
-H0  = $80
-H1  = $84
-H2  = $88
-H3  = $8c
-H4  = $90
-H5  = $94
-H6  = $98
-H7  = $9c
-H8  = $a0
-H9  = $a4
-H10 = $a8
-H11 = $ac
-H12 = $b0
-H13 = $b4
-H14 = $b8
-H15 = $bc
-; These constants refer to 4-byte words within the state.
-COMPRESS_IV0 = H8
-COMPRESS_IV1 = H9
-COMPRESS_IV2 = H10
-COMPRESS_IV3 = H11
-COMPRESS_T0  = H12
-COMPRESS_T1  = H13
-COMPRESS_B   = H14
-COMPRESS_D   = H15
-
-; $c0..100 (64 bytes) is the message block.
-COMPRESS_MSG = $c0
-
-; The chaining value stack ("CV stack") has space for 54 CVs, 32 bytes
-; each: 54 * 32 = 1728 = $06c0
-; $0200 + $06c0 = $08c0
-;
-; Allocating a full CV stack here is excessive, since we only have 64
-; KiB of addressable memory, and the tree depth of a 64 KiB input is six
-; (much less than 54). However, we do have a test case that hashes 1 MB
-; of zeros, much larger than addressable memory. Also this demonstrates
-; that BLAKE3's space overhead isn't too bad, even for the 6502.
-CV_STACK_START = $200
-CV_STACK_CAPACITY_END = CV_STACK_START + (54 * 32)
-
-TEST_INPUT_START = CV_STACK_CAPACITY_END
-TEST_INPUT_END   = TEST_INPUT_START + (10 * 1024)
-
-; compression function bitflags
-; Note that keying and key derivation aren't supported here.
+; domain separation bitflags for the compression function
+; Note that KEYED_HASH and the DERIVE_KEY flags aren't supported.
 CHUNK_START = (1 << 0)
 CHUNK_END   = (1 << 1)
 PARENT      = (1 << 2)
 ROOT        = (1 << 3)
+
 
 main:
   ldx #$ff        ; initialize the stack pointer
@@ -1058,7 +1023,7 @@ compress_init_mptrs_loop:
   ldx #0
 compress_iv_consts_loop:
   lda IV0_BYTES, x
-  sta COMPRESS_IV0, x
+  sta H8, x
   inx
   cpx #16
   bne compress_iv_consts_loop
