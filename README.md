@@ -7,7 +7,7 @@ Commodore&nbsp;64, and the NES console. This implementation of BLAKE3
 runs on [Ben Eater's 6502 breadboard computer](https://eater.net/6502).
 Source code is in [`rom.s`](rom.s).
 
-<img src="photo.jpg" height="500px">
+<img src="photo.jpg" width="420px">
 
 This program loops over the [BLAKE3 test
 vectors](https://github.com/BLAKE3-team/BLAKE3/blob/master/test_vectors/test_vectors.json)
